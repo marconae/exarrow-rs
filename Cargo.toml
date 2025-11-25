@@ -1,0 +1,45 @@
+[package]
+name = "exarrow-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["exarrow-rs contributors"]
+license = "MIT"
+description = "ADBC-compatible driver for Exasol with Arrow data format support"
+repository = "https://github.com/your-org/exarrow-rs"
+keywords = ["exasol", "adbc", "arrow", "database", "driver"]
+categories = ["database"]
+
+[dependencies]
+# Apache Arrow support
+arrow = "54.0"
+arrow-schema = "54.0"
+
+# Async runtime
+tokio = { version = "1.42", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+
+# TLS support
+native-tls = "0.2"
+
+# Async utilities
+futures-util = "0.3"
+async-trait = "0.1"
+
+# URL encoding/decoding
+urlencoding = "2.1"
+
+# Hex encoding for binary data
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
