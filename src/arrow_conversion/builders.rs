@@ -215,7 +215,7 @@ fn parse_decimal_to_i128(
     // Scale up by 10^scale
     result = result
         .checked_mul(10_i128.pow(scale as u32))
-        .ok_or_else(|| ConversionError::NumericOverflow { row, column })?;
+        .ok_or(ConversionError::NumericOverflow { row, column })?;
 
     // Add the decimal part
     if !decimal_part.is_empty() {
@@ -238,7 +238,7 @@ fn parse_decimal_to_i128(
             } else {
                 scaled_decimal
             })
-            .ok_or_else(|| ConversionError::NumericOverflow { row, column })?;
+            .ok_or(ConversionError::NumericOverflow { row, column })?;
     }
 
     Ok(result)
@@ -353,7 +353,7 @@ fn parse_date_to_days(date_str: &str, row: usize, column: usize) -> Result<i32, 
             message: format!("Invalid day: {}", parts[2]),
         })?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return Err(ConversionError::ValueConversionFailed {
             row,
             column,
@@ -720,7 +720,7 @@ fn build_binary_array(values: &[Value], column: usize) -> Result<ArrayRef, Conve
 
 /// Decode a hex string to bytes.
 fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(());
     }
 

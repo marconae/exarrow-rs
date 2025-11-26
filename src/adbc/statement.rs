@@ -197,7 +197,7 @@ impl Statement {
     ///
     /// // For SELECT queries, iterate over results
     /// if result_set.is_stream() {
-    ///     for batch in result_set.into_iter()? {
+    ///     for batch in result_set.into_iterator()? {
     ///         let batch = batch?;
     ///         println!("Rows: {}", batch.num_rows());
     ///     }

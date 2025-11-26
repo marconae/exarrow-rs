@@ -346,7 +346,7 @@ pub struct SessionManager {
     sessions: Arc<RwLock<std::collections::HashMap<String, Arc<Session>>>>,
 
     /// Session factory (authentication handler)
-    auth_handler: Arc<AuthenticationHandler>,
+    _auth_handler: Arc<AuthenticationHandler>,
 
     /// Session configuration
     config: SessionConfig,
@@ -357,7 +357,7 @@ impl SessionManager {
     pub fn new(auth_handler: Arc<AuthenticationHandler>, config: SessionConfig) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            auth_handler,
+            _auth_handler: auth_handler,
             config,
         }
     }

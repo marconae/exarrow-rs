@@ -3,7 +3,6 @@
 use crate::error::ConversionError;
 use crate::types::{ExasolType, TypeMapper};
 use arrow_schema::{Field, Schema};
-use std::sync::Arc;
 
 /// Column metadata from Exasol result set.
 #[derive(Debug, Clone)]
@@ -82,6 +81,7 @@ impl Default for SchemaBuilder {
 /// Helper to extract column metadata from Exasol WebSocket response.
 ///
 /// This will be used by the Arrow converter to parse result set metadata.
+#[allow(dead_code)]
 pub fn extract_column_metadata_from_json(
     columns: &[serde_json::Value],
 ) -> Result<Vec<ColumnMetadata>, ConversionError> {

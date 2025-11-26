@@ -212,11 +212,10 @@ impl TypeMapper {
                 metadata.insert("exasol:precision".to_string(), precision.to_string());
                 metadata.insert("exasol:scale".to_string(), scale.to_string());
             }
-            ExasolType::Geometry { srid } => {
-                if let Some(srid) = srid {
-                    metadata.insert("exasol:srid".to_string(), srid.to_string());
-                }
+            ExasolType::Geometry { srid: Some(srid) } => {
+                metadata.insert("exasol:srid".to_string(), srid.to_string());
             }
+            ExasolType::Geometry { srid: None } => {}
             _ => {}
         }
 

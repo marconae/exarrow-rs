@@ -468,8 +468,8 @@ fn parse_host_port(host_port: &str) -> Result<(String, u16), ConnectionError> {
             let host = host_port[1..close_bracket].to_string();
             let port_part = &host_port[close_bracket + 1..];
 
-            let port = if port_part.starts_with(':') {
-                port_part[1..].parse().map_err(|_| {
+            let port = if let Some(stripped) = port_part.strip_prefix(':') {
+                stripped.parse().map_err(|_| {
                     ConnectionError::ParseError(format!("Invalid port: {}", port_part))
                 })?
             } else {

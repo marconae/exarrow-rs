@@ -158,7 +158,7 @@ impl ResultSet {
     ///
     /// # Errors
     /// Returns `QueryError::NoResultSet` if this is not a streaming result.
-    pub fn into_iter(self) -> Result<ResultSetIterator, QueryError> {
+    pub fn into_iterator(self) -> Result<ResultSetIterator, QueryError> {
         match self.inner {
             ResultSetInner::Stream {
                 handle,

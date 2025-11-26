@@ -33,7 +33,7 @@
 //! let result_set = stmt.execute().await?;
 //!
 //! // Iterate over results
-//! for batch in result_set {
+//! for batch in result_set.into_iterator()? {
 //!     let batch = batch?;
 //!     println!("Batch rows: {}", batch.num_rows());
 //! }
