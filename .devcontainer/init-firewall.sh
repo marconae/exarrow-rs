@@ -2,6 +2,21 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
+# Wait for network to be ready
+echo "Waiting for network..."
+for i in {1..10}; do
+    if curl -s --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
+        echo "Network is ready"
+        break
+    fi
+    if [ $i -eq 10 ]; then
+        echo "ERROR: Network not ready after 10 attempts"
+        exit 1
+    fi
+    echo "Attempt $i failed, retrying in 2s..."
+    sleep 2
+done
+
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
@@ -74,7 +89,8 @@ for domain in \
     "static.rust-lang.org" \
     "doc.rust-lang.org" \
     "docs.rs" \
-    "rustup.rs"; do
+    "rustup.rs" \
+    "registry.npmjs.org"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then

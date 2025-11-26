@@ -1,0 +1,27 @@
+services:
+  dev-con:
+    image: exarrow-dev:1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TZ: ${TZ:-UTC}
+    container_name: dev-con
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ..:/workspace:cached
+    environment:
+      - RUST_BACKTRACE=1
+    depends_on:
+      - dev-exa-db
+    # Keep container running
+    command: sleep infinity
+
+  dev-exa-db:
+    image: exasol/docker-db:2025.2.0-arm64dev.0
+    container_name: dev-exa-db
+    privileged: true
+    ports:
+      - "8564:8563"

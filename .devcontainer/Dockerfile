@@ -2,11 +2,6 @@
 
 FROM debian:bookworm-slim
 
-ARG TZ
-ENV TZ="${TZ:-UTC}"
-
-ARG CLAUDE_CODE_VERSION=latest
-
 # Install development tools, networking, and firewall dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Build essentials for Rust
@@ -38,6 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     aggregate \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Set timezone (after apt-get for better caching)
+ARG TZ
+ENV TZ="${TZ:-UTC}"
+
 # Create non-root user for development
 ARG USERNAME=coder
 ARG USER_UID=1000
@@ -48,11 +47,6 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
-# Persist shell history
-RUN mkdir /commandhistory \
-    && touch /commandhistory/.bash_history \
-    && chown -R $USERNAME /commandhistory
-
 # Set DEVCONTAINER environment variable
 ENV DEVCONTAINER=true
 
@@ -61,13 +55,6 @@ RUN mkdir -p /workspace /home/$USERNAME/.claude /home/$USERNAME/.cargo \
     && chown -R $USERNAME:$USERNAME /workspace /home/$USERNAME/.claude /home/$USERNAME/.cargo
 
 WORKDIR /workspace
-
-# Install git-delta for better diffs
-ARG GIT_DELTA_VERSION=0.18.2
-RUN ARCH=$(dpkg --print-architecture) && \
-    wget -q "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
-    dpkg -i "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" && \
-    rm "git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb"
 
 # Switch to non-root user for remaining installations
 USER $USERNAME
@@ -99,21 +86,22 @@ USER $USERNAME
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=$PATH:/usr/local/share/npm-global/bin
 
-# Install Claude Code CLI
+# Install Claude Code CLI (pinned version for caching, updated via updateContentCommand)
+ARG CLAUDE_CODE_VERSION=2.0.54
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 RUN mkdir -p /home/$USERNAME/.claude
 
-# Install OpenSpec CLI
-RUN npm install -g @fission-ai/openspec@latest
+# Install OpenSpec CLI (pinned version for caching)
+RUN npm install -g @fission-ai/openspec@0.16.0
 
 # Set shell and editor preferences
 ENV SHELL=/bin/bash
 ENV EDITOR=vim
 ENV VISUAL=vim
 
-# Copy and set up firewall script
-COPY init-firewall.sh /usr/local/bin/
+# Copy and set up firewall script (last step)
 USER root
+COPY init-firewall.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/init-firewall.sh \
     && echo "$USERNAME ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/$USERNAME-firewall \
     && chmod 0440 /etc/sudoers.d/$USERNAME-firewall
