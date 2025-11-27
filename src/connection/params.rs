@@ -68,17 +68,14 @@ impl FromStr for ConnectionParams {
     type Err = ConnectionError;
 
     /// Parse a connection string in the format:
-    /// `exasol://[username[:password]@]host[:port][/schema][?param=value&...]`
+    /// `exasol://username[:password]@host[:port][/schema][?param=value&...]`
     ///
     /// # Examples
     ///
     /// ```
     /// # use exarrow_rs::connection::ConnectionParams;
     /// # use std::str::FromStr;
-    /// // Basic connection
-    /// let params = ConnectionParams::from_str("exasol://localhost:8563")?;
-    ///
-    /// // With authentication
+    /// // Basic connection with authentication
     /// let params = ConnectionParams::from_str("exasol://user:pass@localhost:8563")?;
     ///
     /// // With schema and parameters

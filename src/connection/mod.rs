@@ -7,6 +7,7 @@
 //!
 //! ```no_run
 //! # use exarrow_rs::connection::{ConnectionBuilder, ConnectionParams};
+//! # use std::str::FromStr;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Using ConnectionBuilder
 //! let params = ConnectionBuilder::new()

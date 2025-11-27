@@ -23,27 +23,27 @@
 //!
 //! Tests use the following defaults which can be overridden via environment variables:
 //!
-//! | Default Constant | Environment Variable | Default Value |
-//! |-----------------|---------------------|---------------|
-//! | `DEFAULT_HOST`  | `EXASOL_HOST`       | "localhost"   |
-//! | `DEFAULT_PORT`  | `EXASOL_PORT`       | 8563          |
-//! | `DEFAULT_USER`  | `EXASOL_USER`       | "sys"         |
-//! | `DEFAULT_PASSWORD` | `EXASOL_PASSWORD` | "exasol"    |
+//! | Default Constant   | Environment Variable | Default Value |
+//! |--------------------|----------------------|---------------|
+//! | `DEFAULT_HOST`     | `EXASOL_HOST`        | "localhost"   |
+//! | `DEFAULT_PORT`     | `EXASOL_PORT`        | 8563          |
+//! | `DEFAULT_USER`     | `EXASOL_USER`        | "sys"         |
+//! | `DEFAULT_PASSWORD` | `EXASOL_PASSWORD`    | "exasol"      |
 //!
 //! # Running Integration Tests
 //!
-//! Integration tests are marked with `#[ignore]` by default since they require
-//! a live Exasol instance. To run them:
+//! Integration tests automatically skip if Exasol is not available at the
+//! configured host and port. To run them:
 //!
 //! ```bash
-//! # Run all ignored (integration) tests
-//! cargo test --test integration_tests -- --ignored
+//! # Run all integration tests (skips if Exasol unavailable)
+//! cargo test --test integration_tests
 //!
 //! # Run a specific integration test
-//! cargo test --test integration_tests test_connection_succeeds -- --ignored
+//! cargo test --test integration_tests test_connection_succeeds
 //!
 //! # Run with custom configuration
-//! EXASOL_HOST=myhost EXASOL_PORT=9563 cargo test --test integration_tests -- --ignored
+//! EXASOL_HOST=myhost EXASOL_PORT=9563 cargo test --test integration_tests
 //! ```
 //!
 //! # Test Cleanup
@@ -54,7 +54,7 @@
 
 use exarrow_rs::adbc::{Connection, Driver};
 use std::env;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 // ============================================================================
@@ -209,16 +209,19 @@ pub fn is_exasol_available() -> bool {
     let port = get_port();
     let addr = format!("{}:{}", host, port);
 
-    // Attempt a TCP connection with a short timeout
-    TcpStream::connect_timeout(
-        &addr.parse().unwrap_or_else(|_| {
-            format!("127.0.0.1:{}", port)
-                .parse()
-                .expect("Invalid fallback address")
-        }),
-        Duration::from_secs(2),
-    )
-    .is_ok()
+    // Resolve the hostname to socket addresses (handles both hostnames and IPs)
+    let socket_addrs: Vec<_> = match addr.to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
+        Err(_) => return false,
+    };
+
+    // Try connecting to any of the resolved addresses
+    for socket_addr in socket_addrs {
+        if TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2)).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Skip a test if Exasol is not available.

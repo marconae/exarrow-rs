@@ -27,7 +27,7 @@
 //! let connection = database.connect().await?;
 //!
 //! // Execute query
-//! let statement = connection.create_statement("SELECT * FROM table")?;
+//! let mut statement = connection.create_statement("SELECT * FROM my_table").await?;
 //! let results = statement.execute().await?;
 //!
 //! // Close connection

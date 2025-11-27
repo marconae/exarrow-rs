@@ -557,18 +557,18 @@ mod tests {
         // This is a test RSA public key (2048-bit) in PKCS#1 PEM format
         // Generated specifically for testing - NOT for production use
         let test_public_key_pem = r#"-----BEGIN RSA PUBLIC KEY-----
-MIIBCgKCAQEA0m59l2u9iDnMbrXHfqkOrn2dVQ3vfBJqcDuFUK03d+1PZGbVlNCq
-nbl6SRU1TGxj3CUvYGFvFr3VXLmVl8o0FNZIj8s2LHxqH8wvJkWmEEuiN6dFm6dV
-Gg4TLHqKjKBgQoWY2X2qFYDJl6xKEj5RBb9ygEgDxvUq8dLl9cYFl4VYHJ4H8Hgp
-8EJxfReFUPKoGWnzqNtDfIqI3XqFJNaKz6L8j3sI4EEnzc3E9ynSFD0CgYBWx5q0
-UvD9PX9mL6sJB0BT0E5kFNLQqN7hJlzLFXrC8qG5dMKGjxI+G1hZ2L3dE7lLvWay
-0LlY3C2eR5YU1wIDAQAB
+MIIBCgKCAQEAulMKxKfPd02qNEVCU1M6hG/Vc9xz+0u+N47Qqa1Y0E2A5bDiz3XA
+aCg2d65C7DyuTL38zwmOtjagvvIAgRj9yDf0v1/v9e1X4l5XE6UiaKKqdcXNy6lJ
+QspqkOBUptlz+2h/G8Z12++xUo/4AGAGz9ZkrRRvcTGW1GJhCROizeJhTpGMpc/v
+o1G53uy2eTHwnz5S3YgJF7nfX60wjJ99ifQuQ9BhDIYLNqzwHTzExMN63v0UOBIL
+vJ+yVUqh0/T2f5e9E1lDNuIqLyXe8VwwUsS72A1EGtg0s77+xUQ7KiGRbHD4bsBo
+A74EI7MHQ7163wVPT0VWFRvUmmv+UO7W8wIDAQAB
 -----END RSA PUBLIC KEY-----"#;
 
         let result =
             WebSocketTransport::encrypt_password("test_password", test_public_key_pem);
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "encrypt_password failed: {:?}", result.err());
         let encrypted = result.unwrap();
 
         // The encrypted result should be base64-encoded

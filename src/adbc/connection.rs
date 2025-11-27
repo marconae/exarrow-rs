@@ -34,7 +34,7 @@ use tokio::sync::Mutex;
 /// let connection = database.connect().await?;
 ///
 /// // Execute a query
-/// let stmt = connection.create_statement("SELECT * FROM my_table")?;
+/// let mut stmt = connection.create_statement("SELECT * FROM my_table").await?;
 /// let results = stmt.execute().await?;
 ///
 /// // Close the connection
@@ -184,7 +184,7 @@ impl Connection {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let stmt = connection.create_statement("SELECT * FROM users").await?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM users").await?;
     /// let results = stmt.execute().await?;
     /// # Ok(())
     /// # }

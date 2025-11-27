@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 ///
 /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
 /// // Create a statement
-/// let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ?")?;
+/// let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ?").await?;
 ///
 /// // Bind parameters
 /// stmt.bind(0, 18)?;
@@ -93,7 +93,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("SELECT * FROM large_table")?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM large_table").await?;
     /// stmt.set_timeout(60_000); // 60 seconds
     /// let results = stmt.execute().await?;
     /// # Ok(())
@@ -121,7 +121,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE id = ?")?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE id = ?").await?;
     /// stmt.bind(0, 42)?;
     /// let results = stmt.execute().await?;
     /// # Ok(())
@@ -146,7 +146,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ? AND active = ?")?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ? AND active = ?").await?;
     /// stmt.bind_all(&[18, 1])?;
     /// let results = stmt.execute().await?;
     /// # Ok(())
@@ -163,7 +163,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE id = ?")?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM users WHERE id = ?").await?;
     /// stmt.bind(0, 42)?;
     /// stmt.clear_parameters();
     /// stmt.bind(0, 99)?;
@@ -192,7 +192,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("SELECT * FROM users")?;
+    /// let mut stmt = connection.create_statement("SELECT * FROM users").await?;
     /// let result_set = stmt.execute().await?;
     ///
     /// // For SELECT queries, iterate over results
@@ -255,7 +255,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("DELETE FROM users WHERE active = ?")?;
+    /// let mut stmt = connection.create_statement("DELETE FROM users WHERE active = ?").await?;
     /// stmt.bind(0, false)?;
     /// let count = stmt.execute_update().await?;
     /// println!("Deleted {} rows", count);
@@ -279,7 +279,7 @@ impl Statement {
     /// ```no_run
     /// # use exarrow_rs::adbc::Connection;
     /// # async fn example(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut stmt = connection.create_statement("INSERT INTO logs VALUES (?)")?;
+    /// let mut stmt = connection.create_statement("INSERT INTO logs VALUES (?)").await?;
     ///
     /// // Execute multiple times with different parameters
     /// for i in 0..10 {
