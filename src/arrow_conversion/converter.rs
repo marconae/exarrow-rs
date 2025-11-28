@@ -592,13 +592,13 @@ mod tests {
                 vec![
                     json!(true),
                     json!("123.45"),
-                    json!(3.14159),
+                    json!(std::f64::consts::PI),
                     json!("2024-01-15"),
                 ],
                 vec![
                     json!(false),
                     json!("678.90"),
-                    json!(2.71828),
+                    json!(std::f64::consts::E),
                     json!("2024-02-20"),
                 ],
             ],
