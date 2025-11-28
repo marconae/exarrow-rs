@@ -7,6 +7,7 @@
 //!
 //! The query module is organized into:
 //! - `statement` - SQL statement execution and parameter binding
+//! - `prepared` - Prepared statement handling for parameterized queries
 //! - `results` - Result set iteration and metadata handling
 //!
 //! # Example
@@ -41,10 +42,12 @@
 //! # }
 //! ```
 
+pub mod prepared;
 pub mod results;
 pub mod statement;
 
 // Re-export commonly used types
+pub use prepared::PreparedStatement;
 pub use results::{QueryMetadata, ResultSet, ResultSetIterator};
 pub use statement::{Parameter, Statement, StatementBuilder, StatementType};
 
@@ -58,5 +61,12 @@ mod tests {
         // This is a compile-time check more than a runtime check
         let _: Option<StatementType> = None;
         let _: Option<Parameter> = None;
+    }
+
+    #[test]
+    fn test_prepared_statement_export() {
+        // Verify that PreparedStatement is accessible
+        // This is a compile-time check
+        fn _takes_prepared_stmt(_stmt: PreparedStatement) {}
     }
 }

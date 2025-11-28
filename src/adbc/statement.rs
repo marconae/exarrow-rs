@@ -1,10 +1,12 @@
 //! ADBC Statement implementation.
 //!
 //! This module provides the `Statement` type which wraps the query execution
-//! module and provides an ADBC-compatible API.
+//! module and provides an ADBC-compatible API. It supports both direct execution
+//! and prepared statements for secure parameterized queries.
 
 use crate::connection::session::Session;
 use crate::error::QueryError;
+use crate::query::prepared::PreparedStatement;
 use crate::query::results::ResultSet;
 use crate::query::statement::{Parameter, Statement as QueryStatement};
 use crate::transport::TransportProtocol;
@@ -16,6 +18,12 @@ use tokio::sync::Mutex;
 /// The `Statement` type represents a SQL statement that can be executed
 /// against the database. It supports parameter binding, timeout configuration,
 /// and returns results as Arrow RecordBatches.
+///
+/// # Prepared Statements
+///
+/// For parameterized queries that need to be executed multiple times or require
+/// secure parameter binding, use the [`prepare()`](Statement::prepare) method to
+/// create a [`PreparedStatement`](crate::query::PreparedStatement).
 ///
 /// # Example
 ///
@@ -37,8 +45,12 @@ use tokio::sync::Mutex;
 pub struct Statement {
     /// Underlying query statement
     inner: QueryStatement,
+    /// Transport layer reference (stored separately for prepared statement creation)
+    transport: Arc<Mutex<dyn TransportProtocol>>,
     /// Session reference for state tracking
     session: Arc<Session>,
+    /// SQL query text (stored separately for prepared statement creation)
+    sql: String,
 }
 
 impl Statement {
@@ -59,8 +71,10 @@ impl Statement {
         session: Arc<Session>,
     ) -> Self {
         Self {
-            inner: QueryStatement::new(transport, sql),
+            inner: QueryStatement::new(Arc::clone(&transport), sql.clone()),
+            transport,
             session,
+            sql,
         }
     }
 
@@ -173,6 +187,40 @@ impl Statement {
     /// ```
     pub fn clear_parameters(&mut self) {
         self.inner.clear_parameters();
+    }
+
+    /// Prepare the statement for execution with parameters.
+    ///
+    /// This creates a server-side prepared statement that can be executed
+    /// multiple times with different parameter values. The prepared statement
+    /// uses Exasol's native protocol for secure parameter binding.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use exarrow_rs::adbc::{Driver, Connection};
+    /// # let driver = Driver::new();
+    /// # let db = driver.open("exasol://user:pass@localhost:8563")?;
+    /// # let conn = db.connect().await?;
+    /// let stmt = conn.create_statement("SELECT * FROM users WHERE id = ?").await?;
+    /// let mut prepared = stmt.prepare().await?;
+    /// prepared.bind(0, 42)?;
+    /// let results = prepared.execute().await?;
+    /// prepared.close().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn prepare(&self) -> Result<PreparedStatement, QueryError> {
+        let mut transport = self.transport.lock().await;
+        let handle = transport
+            .create_prepared_statement(&self.sql)
+            .await
+            .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
+
+        drop(transport); // Release lock before creating PreparedStatement
+
+        Ok(PreparedStatement::new(Arc::clone(&self.transport), handle))
     }
 
     /// Execute the statement.
@@ -333,8 +381,8 @@ mod tests {
     use super::*;
     use crate::connection::auth::AuthResponseData;
     use crate::connection::session::SessionConfig;
-    use crate::transport::messages::{ResultData, ResultSetHandle};
-    use crate::transport::protocol::QueryResult as TransportQueryResult;
+    use crate::transport::messages::{DataType, ResultData, ResultSetHandle};
+    use crate::transport::protocol::{PreparedStatementHandle, QueryResult as TransportQueryResult};
     use async_trait::async_trait;
     use mockall::mock;
 
@@ -349,6 +397,9 @@ mod tests {
             async fn execute_query(&mut self, sql: &str) -> Result<TransportQueryResult, crate::error::TransportError>;
             async fn fetch_results(&mut self, handle: ResultSetHandle) -> Result<ResultData, crate::error::TransportError>;
             async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), crate::error::TransportError>;
+            async fn create_prepared_statement(&mut self, sql: &str) -> Result<PreparedStatementHandle, crate::error::TransportError>;
+            async fn execute_prepared_statement(&mut self, handle: &PreparedStatementHandle, parameters: Option<Vec<Vec<serde_json::Value>>>) -> Result<TransportQueryResult, crate::error::TransportError>;
+            async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
             async fn close(&mut self) -> Result<(), crate::error::TransportError>;
             fn is_connected(&self) -> bool;
         }
@@ -491,5 +542,77 @@ mod tests {
 
         let display = format!("{}", stmt);
         assert!(display.contains("SELECT 1"));
+    }
+
+    #[tokio::test]
+    async fn test_statement_prepare() {
+        let mut mock_transport = MockTransport::new();
+
+        mock_transport
+            .expect_create_prepared_statement()
+            .times(1)
+            .returning(|_sql| {
+                Ok(PreparedStatementHandle::new(
+                    42,
+                    1,
+                    vec![DataType {
+                        type_name: "DECIMAL".to_string(),
+                        precision: Some(18),
+                        scale: Some(0),
+                        size: None,
+                        character_set: None,
+                        with_local_time_zone: None,
+                        fraction: None,
+                    }],
+                ))
+            });
+
+        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
+        let session = mock_session();
+
+        let stmt = Statement::new(
+            transport,
+            "SELECT * FROM users WHERE id = ?".to_string(),
+            session,
+        );
+
+        let prepared = stmt.prepare().await.unwrap();
+        assert_eq!(prepared.handle(), 42);
+        assert_eq!(prepared.parameter_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_statement_prepare_and_execute() {
+        let mut mock_transport = MockTransport::new();
+
+        mock_transport
+            .expect_create_prepared_statement()
+            .times(1)
+            .returning(|_sql| Ok(PreparedStatementHandle::new(42, 1, vec![])));
+
+        mock_transport
+            .expect_execute_prepared_statement()
+            .times(1)
+            .returning(|_, _| Ok(TransportQueryResult::RowCount { count: 1 }));
+
+        mock_transport
+            .expect_close_prepared_statement()
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
+        let session = mock_session();
+
+        let stmt = Statement::new(
+            transport,
+            "INSERT INTO users (id) VALUES (?)".to_string(),
+            session,
+        );
+
+        let mut prepared = stmt.prepare().await.unwrap();
+        prepared.bind(0, 42).unwrap();
+        let count = prepared.execute_update().await.unwrap();
+        assert_eq!(count, 1);
+        prepared.close().await.unwrap();
     }
 }

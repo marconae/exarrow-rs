@@ -92,9 +92,36 @@ fn build_boolean_array(values: &[Value], column: usize) -> Result<ArrayRef, Conv
     Ok(Arc::new(builder.finish()))
 }
 
+/// Estimate average string length for capacity pre-allocation.
+/// Uses a sample of the first few non-null values.
+fn estimate_string_capacity(values: &[Value]) -> usize {
+    const SAMPLE_SIZE: usize = 10;
+    const DEFAULT_AVG_LEN: usize = 32;
+
+    let mut total_len = 0;
+    let mut count = 0;
+
+    for value in values.iter().take(SAMPLE_SIZE) {
+        if let Some(s) = value.as_str() {
+            total_len += s.len();
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        let avg_len = total_len / count;
+        // Add some buffer and multiply by total values
+        (avg_len + 8) * values.len()
+    } else {
+        DEFAULT_AVG_LEN * values.len()
+    }
+}
+
 /// Build a String array with UTF-8 validation.
 fn build_string_array(values: &[Value], column: usize) -> Result<ArrayRef, ConversionError> {
-    let mut builder = StringBuilder::with_capacity(values.len(), 1024);
+    // Use better capacity estimation based on actual string lengths
+    let estimated_bytes = estimate_string_capacity(values);
+    let mut builder = StringBuilder::with_capacity(values.len(), estimated_bytes);
 
     for (row, value) in values.iter().enumerate() {
         if value.is_null() {
@@ -114,6 +141,58 @@ fn build_string_array(values: &[Value], column: usize) -> Result<ArrayRef, Conve
     Ok(Arc::new(builder.finish()))
 }
 
+/// Validate that a decimal string fits within the target precision.
+///
+/// This function checks that the total number of significant digits in the
+/// decimal value does not exceed the specified precision.
+///
+/// # Arguments
+/// * `value_str` - The decimal value as a string
+/// * `precision` - The maximum number of significant digits allowed
+/// * `_scale` - The scale (reserved for future use)
+/// * `row` - The row index for error reporting
+/// * `column` - The column index for error reporting
+///
+/// # Returns
+/// `Ok(())` if the value fits within precision, or `ConversionError::NumericOverflow` otherwise.
+fn validate_decimal_precision(
+    value_str: &str,
+    precision: u8,
+    _scale: i8,
+    row: usize,
+    column: usize,
+) -> Result<(), ConversionError> {
+    // Remove sign and decimal point for digit counting
+    let digits: String = value_str
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+
+    let total_digits = digits.len();
+    let max_digits = precision as usize;
+
+    // Also strip leading zeros for accurate precision check
+    let significant_digits = digits.trim_start_matches('0');
+    let significant_count = if significant_digits.is_empty() {
+        1 // "0" has 1 significant digit
+    } else {
+        significant_digits.len()
+    };
+
+    if significant_count > max_digits {
+        return Err(ConversionError::NumericOverflow { row, column });
+    }
+
+    // Also check total raw digit count as a sanity check
+    // (precision includes both integer and fractional parts)
+    if total_digits > max_digits + 1 {
+        // +1 for potential leading zero
+        return Err(ConversionError::NumericOverflow { row, column });
+    }
+
+    Ok(())
+}
+
 /// Build a Decimal128 array.
 fn build_decimal128_array(
     values: &[Value],
@@ -129,7 +208,7 @@ fn build_decimal128_array(
         if value.is_null() {
             builder.append_null();
         } else {
-            let decimal_value = parse_decimal_to_i128(value, scale, row, column)?;
+            let decimal_value = parse_decimal_to_i128(value, precision, scale, row, column)?;
             builder.append_value(decimal_value);
         }
     }
@@ -152,7 +231,7 @@ fn build_decimal256_array(
         if value.is_null() {
             builder.append_null();
         } else {
-            let decimal_value = parse_decimal_to_i256(value, scale, row, column)?;
+            let decimal_value = parse_decimal_to_i256(value, precision, scale, row, column)?;
             builder.append_value(decimal_value);
         }
     }
@@ -163,11 +242,14 @@ fn build_decimal256_array(
 /// Parse a JSON value to i128 for Decimal128.
 fn parse_decimal_to_i128(
     value: &Value,
+    precision: u8,
     scale: i8,
     row: usize,
     column: usize,
 ) -> Result<i128, ConversionError> {
     let value_str = if let Some(s) = value.as_str() {
+        // Validate precision before conversion
+        validate_decimal_precision(s, precision, scale, row, column)?;
         s
     } else if let Some(n) = value.as_i64() {
         return Ok((n as i128) * 10_i128.pow(scale as u32));
@@ -247,13 +329,18 @@ fn parse_decimal_to_i128(
 /// Parse a JSON value to i256 for Decimal256.
 fn parse_decimal_to_i256(
     value: &Value,
+    precision: u8,
     scale: i8,
     row: usize,
     column: usize,
 ) -> Result<i256, ConversionError> {
+    // Validate precision for string values
+    if let Some(s) = value.as_str() {
+        validate_decimal_precision(s, precision, scale, row, column)?;
+    }
     // Parse string and create i256
     // For i256, we need to handle this differently as it's a more complex type
-    let i128_value = parse_decimal_to_i128(value, scale, row, column)?;
+    let i128_value = parse_decimal_to_i128(value, precision, scale, row, column)?;
     Ok(i256::from_i128(i128_value))
 }
 
@@ -693,7 +780,25 @@ fn parse_interval_day_to_second(
 
 /// Build a Binary array for GEOMETRY and HASHTYPE.
 fn build_binary_array(values: &[Value], column: usize) -> Result<ArrayRef, ConversionError> {
-    let mut builder = BinaryBuilder::with_capacity(values.len(), 1024);
+    // Estimate binary capacity: hex strings are 2 chars per byte
+    // Sample up to 10 values to estimate average size
+    const SAMPLE_SIZE: usize = 10;
+    let sample_count = values.len().min(SAMPLE_SIZE);
+    let sample_total: usize = values
+        .iter()
+        .take(SAMPLE_SIZE)
+        .filter_map(|v| v.as_str())
+        .map(|s| s.len() / 2)
+        .sum();
+
+    let estimated_bytes = if sample_count > 0 {
+        let avg_size = (sample_total / sample_count).max(1);
+        avg_size * values.len()
+    } else {
+        values.len() * 32 // Default estimate
+    };
+
+    let mut builder = BinaryBuilder::with_capacity(values.len(), estimated_bytes.max(1024));
 
     for (row, value) in values.iter().enumerate() {
         if value.is_null() {
@@ -823,19 +928,19 @@ mod tests {
     #[test]
     fn test_parse_decimal_to_i128() {
         // Test integer
-        let result = parse_decimal_to_i128(&json!("123"), 2, 0, 0).unwrap();
+        let result = parse_decimal_to_i128(&json!("123"), 10, 2, 0, 0).unwrap();
         assert_eq!(result, 12300); // 123 * 10^2
 
         // Test decimal
-        let result = parse_decimal_to_i128(&json!("123.45"), 2, 0, 0).unwrap();
+        let result = parse_decimal_to_i128(&json!("123.45"), 10, 2, 0, 0).unwrap();
         assert_eq!(result, 12345); // 123.45 * 10^2
 
         // Test negative
-        let result = parse_decimal_to_i128(&json!("-123.45"), 2, 0, 0).unwrap();
+        let result = parse_decimal_to_i128(&json!("-123.45"), 10, 2, 0, 0).unwrap();
         assert_eq!(result, -12345);
 
         // Test from number
-        let result = parse_decimal_to_i128(&json!(123), 2, 0, 0).unwrap();
+        let result = parse_decimal_to_i128(&json!(123), 10, 2, 0, 0).unwrap();
         assert_eq!(result, 12300);
     }
 
@@ -852,5 +957,55 @@ mod tests {
         // Invalid hex
         let values = vec![json!("zzz")];
         assert!(build_binary_array(&values, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_decimal_precision() {
+        // Valid: 5 digits fits in precision 10
+        assert!(validate_decimal_precision("12345", 10, 2, 0, 0).is_ok());
+
+        // Valid: decimal point doesn't count
+        assert!(validate_decimal_precision("123.45", 10, 2, 0, 0).is_ok());
+
+        // Valid: sign doesn't count
+        assert!(validate_decimal_precision("-12345", 10, 2, 0, 0).is_ok());
+
+        // Invalid: 6 significant digits in precision 5
+        assert!(validate_decimal_precision("123456", 5, 2, 0, 0).is_err());
+
+        // Valid: leading zeros don't count as significant
+        assert!(validate_decimal_precision("00123", 5, 2, 0, 0).is_ok());
+
+        // Valid: zero
+        assert!(validate_decimal_precision("0", 1, 0, 0, 0).is_ok());
+
+        // Valid: zero with leading zeros
+        assert!(validate_decimal_precision("000", 5, 0, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_decimal_precision_overflow() {
+        // Test that precision overflow is detected
+        let values = vec![json!("12345678901234567890")]; // 20 digits
+        let result = build_decimal128_array(&values, 10, 2, 0);
+        assert!(result.is_err());
+
+        // Should succeed with sufficient precision
+        let values = vec![json!("12345")]; // 5 digits
+        let result = build_decimal128_array(&values, 10, 2, 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_estimate_string_capacity() {
+        let values = vec![
+            json!("hello"),
+            json!("world"),
+            json!("test"),
+        ];
+        let capacity = estimate_string_capacity(&values);
+        // Average length is about 5, plus buffer, times 3 values
+        assert!(capacity > 0);
+        assert!(capacity >= 15); // At least the actual total length
     }
 }

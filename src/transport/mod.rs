@@ -45,7 +45,9 @@ pub mod websocket;
 
 // Re-export commonly used types
 pub use messages::{ColumnInfo, DataType, ResultData, ResultSetHandle, SessionInfo};
-pub use protocol::{ConnectionParams, Credentials, QueryResult, TransportProtocol};
+pub use protocol::{
+    ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
+};
 pub use websocket::WebSocketTransport;
 
 #[cfg(test)]
@@ -59,5 +61,11 @@ mod tests {
         let _creds = Credentials::new("user".to_string(), "pass".to_string());
         let _transport = WebSocketTransport::new();
         let _handle = ResultSetHandle::new(1);
+    }
+
+    #[test]
+    fn test_prepared_statement_handle_export() {
+        // Verify PreparedStatementHandle is exported and accessible
+        let _handle = PreparedStatementHandle::new(1, 0, vec![]);
     }
 }

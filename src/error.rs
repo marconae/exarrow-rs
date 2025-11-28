@@ -95,6 +95,14 @@ pub enum QueryError {
     /// SQL injection attempt detected
     #[error("Potential SQL injection detected")]
     SqlInjectionDetected,
+
+    /// Prepared statement has been closed
+    #[error("Prepared statement has been closed")]
+    StatementClosed,
+
+    /// Unexpected result set when row count was expected
+    #[error("Expected row count but received result set")]
+    UnexpectedResultSet,
 }
 
 /// Errors related to data type conversion.
@@ -238,6 +246,7 @@ impl QueryError {
             QueryError::Timeout { .. } => AdbcErrorCode::Timeout,
             QueryError::InvalidState(_) => AdbcErrorCode::InvalidState,
             QueryError::ParameterBindingError { .. } => AdbcErrorCode::InvalidArgument,
+            QueryError::StatementClosed => AdbcErrorCode::InvalidState,
             _ => AdbcErrorCode::Query,
         }
     }
@@ -317,5 +326,18 @@ mod tests {
         let err = TransportError::TlsError("Certificate validation failed".to_string());
         assert!(err.to_string().contains("TLS error"));
         assert!(err.to_string().contains("Certificate validation failed"));
+    }
+
+    #[test]
+    fn test_statement_closed_error() {
+        let err = QueryError::StatementClosed;
+        assert!(err.to_string().contains("closed"));
+        assert_eq!(err.to_adbc_code(), AdbcErrorCode::InvalidState);
+    }
+
+    #[test]
+    fn test_unexpected_result_set_error() {
+        let err = QueryError::UnexpectedResultSet;
+        assert!(err.to_string().contains("result set"));
     }
 }

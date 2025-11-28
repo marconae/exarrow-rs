@@ -304,23 +304,23 @@ impl ResultSet {
 
         if data.rows.is_empty() {
             // Create empty batch with schema
-            let empty_arrays: Vec<Arc<dyn arrow::array::Array>> = schema
+            let empty_arrays: Vec<Arc<dyn Array>> = schema
                 .fields()
                 .iter()
-                .map(|field| arrow::array::new_empty_array(field.data_type()))
+                .map(|field| new_empty_array(field.data_type()))
                 .collect();
 
             return RecordBatch::try_new(Arc::clone(schema), empty_arrays)
                 .map_err(|e| ConversionError::ArrowError(e.to_string()));
         }
 
-        let mut arrays: Vec<Arc<dyn arrow::array::Array>> = Vec::new();
+        let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
 
         for (col_idx, field) in schema.fields().iter().enumerate() {
             use arrow::datatypes::DataType;
 
             // Build array based on data type
-            let array: Arc<dyn arrow::array::Array> = match field.data_type() {
+            let array: Arc<dyn Array> = match field.data_type() {
                 DataType::Boolean => {
                     let mut builder = BooleanBuilder::new();
                     for row in &data.rows {
@@ -576,7 +576,7 @@ impl Iterator for ResultSetIterator {
 mod tests {
     use super::*;
     use crate::transport::messages::{ColumnInfo, DataType};
-    use crate::transport::protocol::QueryResult as TransportQueryResult;
+    use crate::transport::protocol::{PreparedStatementHandle, QueryResult as TransportQueryResult};
     use async_trait::async_trait;
     use mockall::mock;
 
@@ -591,6 +591,9 @@ mod tests {
             async fn execute_query(&mut self, sql: &str) -> Result<TransportQueryResult, crate::error::TransportError>;
             async fn fetch_results(&mut self, handle: ResultSetHandle) -> Result<ResultData, crate::error::TransportError>;
             async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), crate::error::TransportError>;
+            async fn create_prepared_statement(&mut self, sql: &str) -> Result<PreparedStatementHandle, crate::error::TransportError>;
+            async fn execute_prepared_statement(&mut self, handle: &PreparedStatementHandle, parameters: Option<Vec<Vec<serde_json::Value>>>) -> Result<TransportQueryResult, crate::error::TransportError>;
+            async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
             async fn close(&mut self) -> Result<(), crate::error::TransportError>;
             fn is_connected(&self) -> bool;
         }

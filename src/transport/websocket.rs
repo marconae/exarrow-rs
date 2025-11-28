@@ -18,11 +18,15 @@ use tokio_tungstenite::{
 use crate::error::TransportError;
 
 use super::messages::{
-    AuthRequest, CloseResultSetRequest, CloseResultSetResponse, DisconnectRequest,
-    DisconnectResponse, ExecuteRequest, ExecuteResponse, FetchRequest, FetchResponse,
+    AuthRequest, ClosePreparedStatementRequest, ClosePreparedStatementResponse,
+    CloseResultSetRequest, CloseResultSetResponse, CreatePreparedStatementRequest,
+    CreatePreparedStatementResponse, DisconnectRequest, DisconnectResponse,
+    ExecutePreparedStatementRequest, ExecuteRequest, ExecuteResponse, FetchRequest, FetchResponse,
     LoginInitRequest, LoginResponse, PublicKeyResponse, ResultData, ResultSetHandle, SessionInfo,
 };
-use super::protocol::{ConnectionParams, Credentials, QueryResult, TransportProtocol};
+use super::protocol::{
+    ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
+};
 
 /// WebSocket transport implementation.
 ///
@@ -393,6 +397,154 @@ impl TransportProtocol for WebSocketTransport {
         Ok(())
     }
 
+    async fn create_prepared_statement(
+        &mut self,
+        sql: &str,
+    ) -> Result<PreparedStatementHandle, TransportError> {
+        if self.state != ConnectionState::Authenticated {
+            return Err(TransportError::ProtocolError(
+                "Must authenticate before creating prepared statements".to_string(),
+            ));
+        }
+
+        // Send create prepared statement request
+        let request = CreatePreparedStatementRequest::new(sql);
+        let response: CreatePreparedStatementResponse = self.send_receive(&request).await?;
+
+        // Check response status
+        self.check_status(&response.status, &response.exception)?;
+
+        // Extract response data
+        let response_data = response.response_data.ok_or_else(|| {
+            TransportError::InvalidResponse("Missing response data".to_string())
+        })?;
+
+        // Extract parameter types from parameter_data if present
+        let (num_params, parameter_types) = if let Some(param_data) = response_data.parameter_data {
+            let types = param_data
+                .columns
+                .into_iter()
+                .map(|p| p.data_type)
+                .collect();
+            (param_data.num_columns, types)
+        } else {
+            (0, vec![])
+        };
+
+        Ok(PreparedStatementHandle::new(
+            response_data.statement_handle,
+            num_params,
+            parameter_types,
+        ))
+    }
+
+    async fn execute_prepared_statement(
+        &mut self,
+        handle: &PreparedStatementHandle,
+        parameters: Option<Vec<Vec<serde_json::Value>>>,
+    ) -> Result<QueryResult, TransportError> {
+        if self.state != ConnectionState::Authenticated {
+            return Err(TransportError::ProtocolError(
+                "Must authenticate before executing prepared statements".to_string(),
+            ));
+        }
+
+        // Build execution request
+        let mut request = ExecutePreparedStatementRequest::new(handle.handle);
+
+        // Add parameters if provided
+        if let Some(data) = parameters {
+            // Build column info from the handle's parameter types
+            let columns: Vec<_> = handle
+                .parameter_types
+                .iter()
+                .enumerate()
+                .map(|(i, dt)| super::messages::ColumnInfo {
+                    name: format!("param{}", i),
+                    data_type: dt.clone(),
+                })
+                .collect();
+
+            request = request.with_data(columns, data);
+        }
+
+        // Send execute prepared statement request
+        let response: ExecuteResponse = self.send_receive(&request).await?;
+
+        // Check response status
+        self.check_status(&response.status, &response.exception)?;
+
+        // Extract result data (same processing as execute_query)
+        let response_data = response
+            .response_data
+            .ok_or_else(|| TransportError::InvalidResponse("Missing response data".to_string()))?;
+
+        if response_data.results.is_empty() {
+            return Err(TransportError::InvalidResponse(
+                "No results returned".to_string(),
+            ));
+        }
+
+        // Process first result
+        let result = &response_data.results[0];
+
+        match result.result_type.as_str() {
+            "resultSet" => {
+                let result_set = result.result_set.as_ref().ok_or_else(|| {
+                    TransportError::InvalidResponse(format!(
+                        "Missing result_set data. Result: {:?}",
+                        result
+                    ))
+                })?;
+
+                let columns = result_set.columns.clone().ok_or_else(|| {
+                    TransportError::InvalidResponse("Missing columns".to_string())
+                })?;
+
+                let rows = result_set.data.clone().unwrap_or_default();
+                let total_rows = result_set.num_rows.unwrap_or(0);
+
+                let data = ResultData {
+                    columns,
+                    rows,
+                    total_rows,
+                };
+
+                let handle = result_set.result_set_handle.map(ResultSetHandle::new);
+
+                Ok(QueryResult::result_set(handle, data))
+            }
+            "rowCount" => {
+                let count = result.row_count.unwrap_or(0);
+                Ok(QueryResult::row_count(count))
+            }
+            other => Err(TransportError::InvalidResponse(format!(
+                "Unknown result type: {}",
+                other
+            ))),
+        }
+    }
+
+    async fn close_prepared_statement(
+        &mut self,
+        handle: &PreparedStatementHandle,
+    ) -> Result<(), TransportError> {
+        if self.state != ConnectionState::Authenticated {
+            return Err(TransportError::ProtocolError(
+                "Must authenticate before closing prepared statements".to_string(),
+            ));
+        }
+
+        // Send close prepared statement request
+        let request = ClosePreparedStatementRequest::new(handle.handle);
+        let response: ClosePreparedStatementResponse = self.send_receive(&request).await?;
+
+        // Check response status
+        self.check_status(&response.status, &response.exception)?;
+
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<(), TransportError> {
         if self.state == ConnectionState::Disconnected || self.state == ConnectionState::Closed {
             return Ok(());
@@ -504,6 +656,54 @@ mod tests {
         assert!(result.is_err());
         if let Err(TransportError::ProtocolError(msg)) = result {
             assert!(msg.contains("Must authenticate before executing queries"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_prepared_statement_requires_authenticated_state() {
+        let mut transport = WebSocketTransport::new();
+
+        let result = transport
+            .create_prepared_statement("SELECT * FROM test WHERE id = ?")
+            .await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before creating prepared statements"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_prepared_statement_requires_authenticated_state() {
+        let mut transport = WebSocketTransport::new();
+        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+
+        let result = transport
+            .execute_prepared_statement(&handle, None)
+            .await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before executing prepared statements"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_close_prepared_statement_requires_authenticated_state() {
+        let mut transport = WebSocketTransport::new();
+        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+
+        let result = transport.close_prepared_statement(&handle).await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before closing prepared statements"));
         } else {
             panic!("Expected ProtocolError");
         }

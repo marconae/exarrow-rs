@@ -7,7 +7,7 @@
 use crate::error::TransportError;
 use async_trait::async_trait;
 
-use super::messages::{ResultData, ResultSetHandle, SessionInfo};
+use super::messages::{DataType, ResultData, ResultSetHandle, SessionInfo};
 
 /// Connection parameters for establishing a transport connection.
 #[derive(Debug, Clone)]
@@ -92,6 +92,28 @@ impl Drop for Credentials {
     }
 }
 
+/// Handle to a prepared statement on the server.
+#[derive(Debug, Clone)]
+pub struct PreparedStatementHandle {
+    /// Server-side statement identifier
+    pub handle: i32,
+    /// Number of parameters expected
+    pub num_params: i32,
+    /// Parameter type information (if available)
+    pub parameter_types: Vec<DataType>,
+}
+
+impl PreparedStatementHandle {
+    /// Create a new prepared statement handle.
+    pub fn new(handle: i32, num_params: i32, parameter_types: Vec<DataType>) -> Self {
+        Self {
+            handle,
+            num_params,
+            parameter_types,
+        }
+    }
+}
+
 /// Transport protocol trait for database communication.
 ///
 /// This trait abstracts the underlying transport mechanism, allowing for
@@ -170,6 +192,58 @@ pub trait TransportProtocol: Send + Sync {
     ///
     /// Returns `TransportError` if close fails.
     async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), TransportError>;
+
+    /// Create a prepared statement from SQL text.
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` - SQL statement with parameter placeholders (?)
+    ///
+    /// # Returns
+    ///
+    /// A statement handle for later execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TransportError` if statement creation fails.
+    async fn create_prepared_statement(
+        &mut self,
+        sql: &str,
+    ) -> Result<PreparedStatementHandle, TransportError>;
+
+    /// Execute a prepared statement with parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Prepared statement handle from create_prepared_statement
+    /// * `parameters` - Parameters in column-major format (each inner Vec is a column)
+    ///
+    /// # Returns
+    ///
+    /// Query result (result set or row count).
+    ///
+    /// # Errors
+    ///
+    /// Returns `TransportError` if execution fails.
+    async fn execute_prepared_statement(
+        &mut self,
+        handle: &PreparedStatementHandle,
+        parameters: Option<Vec<Vec<serde_json::Value>>>,
+    ) -> Result<QueryResult, TransportError>;
+
+    /// Close a prepared statement and release server-side resources.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Prepared statement handle to close
+    ///
+    /// # Errors
+    ///
+    /// Returns `TransportError` if close fails.
+    async fn close_prepared_statement(
+        &mut self,
+        handle: &PreparedStatementHandle,
+    ) -> Result<(), TransportError>;
 
     /// Close the connection.
     ///
@@ -311,6 +385,45 @@ mod tests {
         assert_eq!(creds.password, "secret");
         drop(creds);
         // Password should be cleared (can't test directly after drop)
+    }
+
+    #[test]
+    fn test_prepared_statement_handle_creation() {
+        let param_types = vec![
+            DataType {
+                type_name: "DECIMAL".to_string(),
+                precision: Some(18),
+                scale: Some(0),
+                size: None,
+                character_set: None,
+                with_local_time_zone: None,
+                fraction: None,
+            },
+            DataType {
+                type_name: "VARCHAR".to_string(),
+                precision: None,
+                scale: None,
+                size: Some(100),
+                character_set: Some("UTF8".to_string()),
+                with_local_time_zone: None,
+                fraction: None,
+            },
+        ];
+
+        let handle = PreparedStatementHandle::new(42, 2, param_types);
+        assert_eq!(handle.handle, 42);
+        assert_eq!(handle.num_params, 2);
+        assert_eq!(handle.parameter_types.len(), 2);
+        assert_eq!(handle.parameter_types[0].type_name, "DECIMAL");
+        assert_eq!(handle.parameter_types[1].type_name, "VARCHAR");
+    }
+
+    #[test]
+    fn test_prepared_statement_handle_no_params() {
+        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+        assert_eq!(handle.handle, 1);
+        assert_eq!(handle.num_params, 0);
+        assert!(handle.parameter_types.is_empty());
     }
 
     #[test]

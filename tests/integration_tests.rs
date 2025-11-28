@@ -66,6 +66,7 @@
 //! - `dml_*` - Data manipulation
 //! - `transaction_*` - Transaction handling
 //! - `arrow_*` - Arrow conversion validation
+//! - `prepared_*` - Prepared statement lifecycle and execution
 
 // Declare the common module for shared test utilities
 mod common;
@@ -1786,5 +1787,282 @@ async fn test_empty_result_set() {
 
     // Cleanup
     cleanup_schema(&conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
+
+// ============================================================================
+// Section 8: Prepared Statement Integration Tests
+// ============================================================================
+// Tests for prepared statement lifecycle, parameter binding, and execution.
+
+/// 8.1 Test creating and closing a prepared statement
+#[tokio::test]
+async fn test_prepared_statement_lifecycle() {
+    skip_if_no_exasol!();
+
+    let conn = get_test_connection()
+        .await
+        .expect("Failed to connect");
+
+    // Create a simple prepared statement
+    let stmt = conn
+        .create_statement("SELECT 1")
+        .await
+        .expect("Failed to create statement");
+
+    let mut prepared = stmt
+        .prepare()
+        .await
+        .expect("Failed to prepare statement");
+
+    assert!(!prepared.is_closed());
+    assert_eq!(prepared.parameter_count(), 0);
+
+    // Execute without parameters
+    let results = prepared
+        .execute()
+        .await
+        .expect("Failed to execute prepared statement");
+
+    // Verify we got results
+    let batches = results.fetch_all().await.expect("Failed to fetch results");
+    assert!(!batches.is_empty(), "Should return at least one batch");
+    assert_eq!(batches[0].num_rows(), 1, "Should return 1 row");
+
+    // Close the prepared statement
+    prepared
+        .close()
+        .await
+        .expect("Failed to close prepared statement");
+
+    assert!(prepared.is_closed());
+
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// 8.2 Test prepared statement with parameters (INSERT)
+#[tokio::test]
+async fn test_prepared_statement_with_parameters() {
+    skip_if_no_exasol!();
+
+    let conn = get_test_connection()
+        .await
+        .expect("Failed to connect");
+
+    let schema_name = generate_test_schema_name();
+
+    // Setup: create schema and table
+    let _ = conn
+        .execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await;
+    conn.execute_update(&format!(
+        "CREATE TABLE {}.test_params (id INT, name VARCHAR(100))",
+        schema_name
+    ))
+    .await
+    .expect("Failed to create table");
+
+    // Insert using prepared statement
+    let insert_stmt = conn
+        .create_statement(&format!(
+            "INSERT INTO {}.test_params VALUES (?, ?)",
+            schema_name
+        ))
+        .await
+        .expect("Failed to create insert statement");
+
+    let mut prepared = insert_stmt
+        .prepare()
+        .await
+        .expect("Failed to prepare insert");
+
+    assert_eq!(prepared.parameter_count(), 2);
+
+    // Bind and execute
+    prepared.bind(0, 1).expect("Failed to bind param 0");
+    prepared.bind(1, "Alice").expect("Failed to bind param 1");
+    let rows = prepared
+        .execute_update()
+        .await
+        .expect("Failed to execute insert");
+
+    assert_eq!(rows, 1);
+
+    // Re-bind and execute again
+    prepared.clear_parameters();
+    prepared.bind(0, 2).expect("Failed to bind param 0");
+    prepared.bind(1, "Bob").expect("Failed to bind param 1");
+    let rows = prepared
+        .execute_update()
+        .await
+        .expect("Failed to execute insert");
+
+    assert_eq!(rows, 1);
+
+    prepared.close().await.expect("Failed to close prepared");
+
+    // Verify data was inserted
+    let batches = conn
+        .query(&format!(
+            "SELECT id, name FROM {}.test_params ORDER BY id",
+            schema_name
+        ))
+        .await
+        .expect("Failed to query");
+
+    assert!(!batches.is_empty(), "Should return results");
+    assert_eq!(batches[0].num_rows(), 2);
+
+    // Cleanup
+    conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
+        .await
+        .expect("Failed to drop schema");
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// 8.3 Test prepared statement with SELECT and parameters
+#[tokio::test]
+async fn test_prepared_select_with_parameters() {
+    skip_if_no_exasol!();
+
+    let conn = get_test_connection()
+        .await
+        .expect("Failed to connect");
+
+    let schema_name = generate_test_schema_name();
+
+    // Setup
+    let _ = conn
+        .execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await;
+    conn.execute_update(&format!(
+        "CREATE TABLE {}.test_select (id INT, value INT)",
+        schema_name
+    ))
+    .await
+    .expect("Failed to create table");
+
+    // Insert test data
+    conn.execute_update(&format!(
+        "INSERT INTO {}.test_select VALUES (1, 100), (2, 200), (3, 300)",
+        schema_name
+    ))
+    .await
+    .expect("Failed to insert data");
+
+    // Select with parameter
+    let select_stmt = conn
+        .create_statement(&format!(
+            "SELECT value FROM {}.test_select WHERE id = ?",
+            schema_name
+        ))
+        .await
+        .expect("Failed to create select statement");
+
+    let mut prepared = select_stmt
+        .prepare()
+        .await
+        .expect("Failed to prepare select");
+
+    // Query for id = 2
+    prepared.bind(0, 2).expect("Failed to bind param");
+    let results = prepared
+        .execute()
+        .await
+        .expect("Failed to execute select");
+
+    let batches = results.fetch_all().await.expect("Failed to fetch");
+    assert!(!batches.is_empty(), "Should return results");
+    assert_eq!(batches[0].num_rows(), 1);
+
+    // Query for id = 3 (reuse prepared statement)
+    prepared.clear_parameters();
+    prepared.bind(0, 3).expect("Failed to bind param");
+    let results = prepared
+        .execute()
+        .await
+        .expect("Failed to execute select");
+
+    let batches = results.fetch_all().await.expect("Failed to fetch");
+    assert!(!batches.is_empty(), "Should return results");
+    assert_eq!(batches[0].num_rows(), 1);
+
+    prepared.close().await.expect("Failed to close prepared");
+
+    // Cleanup
+    conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
+        .await
+        .expect("Failed to drop schema");
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// 8.4 Test prepared statement parameter types
+#[allow(clippy::approx_constant)]
+#[tokio::test]
+async fn test_prepared_statement_parameter_types() {
+    skip_if_no_exasol!();
+
+    let conn = get_test_connection()
+        .await
+        .expect("Failed to connect");
+
+    let schema_name = generate_test_schema_name();
+
+    // Setup
+    let _ = conn
+        .execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await;
+    conn.execute_update(&format!(
+        "CREATE TABLE {}.test_types (
+            bool_col BOOLEAN,
+            int_col INTEGER,
+            float_col DOUBLE,
+            str_col VARCHAR(100)
+        )",
+        schema_name
+    ))
+    .await
+    .expect("Failed to create table");
+
+    // Insert using prepared statement with various types
+    let insert_stmt = conn
+        .create_statement(&format!(
+            "INSERT INTO {}.test_types VALUES (?, ?, ?, ?)",
+            schema_name
+        ))
+        .await
+        .expect("Failed to create statement");
+
+    let mut prepared = insert_stmt
+        .prepare()
+        .await
+        .expect("Failed to prepare");
+
+    prepared.bind(0, true).expect("Failed to bind bool");
+    prepared.bind(1, 42i64).expect("Failed to bind int");
+    prepared.bind(2, 3.14f64).expect("Failed to bind float");
+    prepared.bind(3, "hello").expect("Failed to bind string");
+
+    let rows = prepared
+        .execute_update()
+        .await
+        .expect("Failed to execute");
+
+    assert_eq!(rows, 1);
+    prepared.close().await.expect("Failed to close");
+
+    // Verify
+    let batches = conn
+        .query(&format!("SELECT * FROM {}.test_types", schema_name))
+        .await
+        .expect("Failed to query");
+
+    assert!(!batches.is_empty(), "Should return results");
+    assert_eq!(batches[0].num_rows(), 1);
+
+    // Cleanup
+    conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
+        .await
+        .expect("Failed to drop schema");
     conn.close().await.expect("Failed to close connection");
 }

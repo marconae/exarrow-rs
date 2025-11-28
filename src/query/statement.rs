@@ -402,7 +402,7 @@ impl StatementBuilder {
 mod tests {
     use super::*;
     use crate::transport::messages::{ColumnInfo, DataType, ResultData, ResultSetHandle};
-    use crate::transport::protocol::QueryResult as TransportQueryResult;
+    use crate::transport::protocol::{PreparedStatementHandle, QueryResult as TransportQueryResult};
     use async_trait::async_trait;
     use mockall::mock;
 
@@ -417,6 +417,9 @@ mod tests {
             async fn execute_query(&mut self, sql: &str) -> Result<TransportQueryResult, crate::error::TransportError>;
             async fn fetch_results(&mut self, handle: ResultSetHandle) -> Result<ResultData, crate::error::TransportError>;
             async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), crate::error::TransportError>;
+            async fn create_prepared_statement(&mut self, sql: &str) -> Result<PreparedStatementHandle, crate::error::TransportError>;
+            async fn execute_prepared_statement(&mut self, handle: &PreparedStatementHandle, parameters: Option<Vec<Vec<serde_json::Value>>>) -> Result<TransportQueryResult, crate::error::TransportError>;
+            async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
             async fn close(&mut self) -> Result<(), crate::error::TransportError>;
             fn is_connected(&self) -> bool;
         }

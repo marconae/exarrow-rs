@@ -44,7 +44,7 @@ impl ArrowConverter {
 
         // Build Arrow schema
         let mut schema_builder = SchemaBuilder::new();
-        let mut column_types = Vec::new();
+        let mut column_types = Vec::with_capacity(column_metadata.len());
 
         for (name, exasol_type) in column_metadata {
             schema_builder = schema_builder.add_column(crate::types::ColumnMetadata {
@@ -106,8 +106,65 @@ impl ArrowConverter {
             }
         }
 
-        // Transpose row-major data to column-major
-        let columns_data = transpose_rows_to_columns(&result_data.rows, num_columns);
+        // Transpose row-major data to column-major (cloning variant for borrowed data)
+        let columns_data = transpose_rows_to_columns_borrowed(&result_data.rows, num_columns);
+
+        // Build Arrow arrays for each column
+        let arrays: Result<Vec<_>, _> = self
+            .column_types
+            .iter()
+            .enumerate()
+            .map(|(col_idx, exasol_type)| build_array(exasol_type, &columns_data[col_idx], col_idx))
+            .collect();
+
+        let arrays = arrays?;
+
+        // Create RecordBatch
+        RecordBatch::try_new(Arc::clone(&self.schema), arrays)
+            .map_err(|e| ConversionError::ArrowError(e.to_string()))
+    }
+
+    /// Convert Exasol result data to an Arrow RecordBatch, consuming the input.
+    ///
+    /// This is an optimized version that takes ownership of the result data to avoid
+    /// cloning values during the row-to-column transpose operation.
+    ///
+    /// # Arguments
+    /// * `result_data` - The result data from Exasol WebSocket response (consumed)
+    ///
+    /// # Returns
+    /// An Arrow `RecordBatch` containing the converted data
+    ///
+    /// # Errors
+    /// Returns `ConversionError` if:
+    /// - The data doesn't match the schema
+    /// - Type conversion fails for any value
+    /// - Numeric overflow occurs
+    /// - UTF-8 validation fails for strings
+    pub fn convert_to_record_batch_owned(
+        &self,
+        result_data: ResultData,
+    ) -> Result<RecordBatch, ConversionError> {
+        // Handle empty result set
+        if result_data.rows.is_empty() {
+            return Ok(RecordBatch::new_empty(Arc::clone(&self.schema)));
+        }
+
+        // Verify row structure matches schema
+        let num_columns = self.column_types.len();
+        for (row_idx, row) in result_data.rows.iter().enumerate() {
+            if row.len() != num_columns {
+                return Err(ConversionError::SchemaMismatch(format!(
+                    "Row {} has {} columns, expected {}",
+                    row_idx,
+                    row.len(),
+                    num_columns
+                )));
+            }
+        }
+
+        // Transpose row-major data to column-major (move variant - no cloning)
+        let columns_data = transpose_rows_to_columns(result_data.rows, num_columns);
 
         // Build Arrow arrays for each column
         let arrays: Result<Vec<_>, _> = self
@@ -140,6 +197,26 @@ impl ArrowConverter {
         result_data_chunks
             .iter()
             .map(|chunk| self.convert_to_record_batch(chunk))
+            .collect()
+    }
+
+    /// Convert multiple result chunks to RecordBatches, consuming the input.
+    ///
+    /// This is an optimized version that takes ownership of the chunks to avoid
+    /// cloning values during conversion.
+    ///
+    /// # Arguments
+    /// * `result_data_chunks` - Multiple result data chunks (consumed)
+    ///
+    /// # Returns
+    /// A vector of `RecordBatch` instances
+    pub fn convert_chunks_owned(
+        &self,
+        result_data_chunks: Vec<ResultData>,
+    ) -> Result<Vec<RecordBatch>, ConversionError> {
+        result_data_chunks
+            .into_iter()
+            .map(|chunk| self.convert_to_record_batch_owned(chunk))
             .collect()
     }
 }
@@ -206,15 +283,61 @@ fn parse_exasol_type(
     }
 }
 
-/// Transpose row-major data to column-major.
+/// Transpose row-major data to column-major, taking ownership to avoid clones.
 ///
-/// Converts Vec<Vec<Value>> (rows) to Vec<Vec<Value>> (columns).
-fn transpose_rows_to_columns(rows: &[Vec<Value>], num_columns: usize) -> Vec<Vec<Value>> {
-    let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(rows.len()); num_columns];
+/// Converts `Vec<Vec<Value>>` (rows) to `Vec<Vec<Value>>` (columns) by moving
+/// values instead of cloning them.
+///
+/// # Arguments
+/// * `rows` - Row-major data (consumed)
+/// * `num_columns` - Number of columns expected
+///
+/// # Returns
+/// Column-major data where each inner `Vec` contains all values for one column
+fn transpose_rows_to_columns(rows: Vec<Vec<Value>>, num_columns: usize) -> Vec<Vec<Value>> {
+    let num_rows = rows.len();
+
+    // Pre-allocate column vectors with exact capacity
+    let mut columns: Vec<Vec<Value>> = (0..num_columns)
+        .map(|_| Vec::with_capacity(num_rows))
+        .collect();
+
+    // Drain each row to move values instead of cloning
+    for mut row in rows {
+        for (col_idx, value) in row.drain(..).enumerate() {
+            if col_idx < num_columns {
+                columns[col_idx].push(value);
+            }
+        }
+    }
+
+    columns
+}
+
+/// Transpose row-major data to column-major from borrowed data.
+///
+/// This version clones values since it works with borrowed data.
+/// Use `transpose_rows_to_columns` when you can pass ownership for better performance.
+///
+/// # Arguments
+/// * `rows` - Row-major data (borrowed)
+/// * `num_columns` - Number of columns expected
+///
+/// # Returns
+/// Column-major data where each inner `Vec` contains all values for one column
+fn transpose_rows_to_columns_borrowed(rows: &[Vec<Value>], num_columns: usize) -> Vec<Vec<Value>> {
+    let num_rows = rows.len();
+
+    // Pre-allocate column vectors with exact capacity
+    let mut columns: Vec<Vec<Value>> = (0..num_columns)
+        .map(|_| Vec::with_capacity(num_rows))
+        .collect();
 
     for row in rows {
         for (col_idx, value) in row.iter().enumerate() {
-            columns[col_idx].push(value.clone());
+            if col_idx < num_columns {
+                columns[col_idx].push(value.clone());
+            }
         }
     }
 
@@ -318,6 +441,26 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_simple_result_owned() {
+        let columns = create_test_columns();
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        let result_data = ResultData {
+            columns: columns.clone(),
+            rows: vec![
+                vec![json!(1), json!("Alice"), json!(true)],
+                vec![json!(2), json!("Bob"), json!(false)],
+                vec![json!(3), json!("Charlie"), json!(true)],
+            ],
+            total_rows: 3,
+        };
+
+        let batch = converter.convert_to_record_batch_owned(result_data).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[test]
     fn test_convert_with_nulls() {
         let columns = create_test_columns();
         let converter = ArrowConverter::new(&columns).unwrap();
@@ -333,6 +476,31 @@ mod tests {
         };
 
         let batch = converter.convert_to_record_batch(&result_data).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.num_columns(), 3);
+
+        // Check null counts
+        assert_eq!(batch.column(0).null_count(), 1); // id has 1 null
+        assert_eq!(batch.column(1).null_count(), 1); // name has 1 null
+        assert_eq!(batch.column(2).null_count(), 1); // active has 1 null
+    }
+
+    #[test]
+    fn test_convert_with_nulls_owned() {
+        let columns = create_test_columns();
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        let result_data = ResultData {
+            columns: columns.clone(),
+            rows: vec![
+                vec![json!(1), json!("Alice"), json!(true)],
+                vec![json!(2), json!(null), json!(false)],
+                vec![json!(null), json!("Charlie"), json!(null)],
+            ],
+            total_rows: 3,
+        };
+
+        let batch = converter.convert_to_record_batch_owned(result_data).unwrap();
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(batch.num_columns(), 3);
 
@@ -373,6 +541,36 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_multiple_chunks_owned() {
+        let columns = create_test_columns();
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        let chunks = vec![
+            ResultData {
+                columns: columns.clone(),
+                rows: vec![
+                    vec![json!(1), json!("Alice"), json!(true)],
+                    vec![json!(2), json!("Bob"), json!(false)],
+                ],
+                total_rows: 4,
+            },
+            ResultData {
+                columns: columns.clone(),
+                rows: vec![
+                    vec![json!(3), json!("Charlie"), json!(true)],
+                    vec![json!(4), json!("Dave"), json!(false)],
+                ],
+                total_rows: 4,
+            },
+        ];
+
+        let batches = converter.convert_chunks_owned(chunks).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 2);
+        assert_eq!(batches[1].num_rows(), 2);
+    }
+
+    #[test]
     fn test_schema_mismatch_error() {
         let columns = create_test_columns();
         let converter = ArrowConverter::new(&columns).unwrap();
@@ -385,6 +583,26 @@ mod tests {
         };
 
         let result = converter.convert_to_record_batch(&result_data);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConversionError::SchemaMismatch(_)
+        ));
+    }
+
+    #[test]
+    fn test_schema_mismatch_error_owned() {
+        let columns = create_test_columns();
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        // Wrong number of columns in data
+        let result_data = ResultData {
+            columns: columns.clone(),
+            rows: vec![vec![json!(1), json!("Alice")]], // Missing 'active' column
+            total_rows: 1,
+        };
+
+        let result = converter.convert_to_record_batch_owned(result_data);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -495,7 +713,7 @@ mod tests {
             vec![json!(3), json!("c"), json!(true)],
         ];
 
-        let columns = transpose_rows_to_columns(&rows, 3);
+        let columns = transpose_rows_to_columns(rows, 3);
         assert_eq!(columns.len(), 3);
         assert_eq!(columns[0].len(), 3); // First column has 3 values
         assert_eq!(columns[1].len(), 3); // Second column has 3 values
@@ -509,6 +727,49 @@ mod tests {
         assert_eq!(columns[1][0], json!("a"));
         assert_eq!(columns[1][1], json!("b"));
         assert_eq!(columns[1][2], json!("c"));
+    }
+
+    #[test]
+    fn test_transpose_rows_to_columns_borrowed() {
+        let rows = vec![
+            vec![json!(1), json!("a"), json!(true)],
+            vec![json!(2), json!("b"), json!(false)],
+            vec![json!(3), json!("c"), json!(true)],
+        ];
+
+        let columns = transpose_rows_to_columns_borrowed(&rows, 3);
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].len(), 3); // First column has 3 values
+        assert_eq!(columns[1].len(), 3); // Second column has 3 values
+        assert_eq!(columns[2].len(), 3); // Third column has 3 values
+
+        // Check values
+        assert_eq!(columns[0][0], json!(1));
+        assert_eq!(columns[0][1], json!(2));
+        assert_eq!(columns[0][2], json!(3));
+
+        assert_eq!(columns[1][0], json!("a"));
+        assert_eq!(columns[1][1], json!("b"));
+        assert_eq!(columns[1][2], json!("c"));
+
+        // Original rows should still be accessible (borrowed variant)
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn test_transpose_handles_extra_columns_gracefully() {
+        // Test that rows with more columns than expected are handled safely
+        let rows = vec![
+            vec![json!(1), json!("a"), json!(true), json!("extra")],
+            vec![json!(2), json!("b"), json!(false), json!("extra2")],
+        ];
+
+        // Only request 3 columns
+        let columns = transpose_rows_to_columns(rows, 3);
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].len(), 2);
+        assert_eq!(columns[1].len(), 2);
+        assert_eq!(columns[2].len(), 2);
     }
 
     #[test]
@@ -608,5 +869,100 @@ mod tests {
         let batch = converter.convert_to_record_batch(&result_data).unwrap();
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 4);
+    }
+
+    #[test]
+    fn test_all_data_types_conversion_owned() {
+        let columns = vec![
+            ColumnInfo {
+                name: "bool_col".to_string(),
+                data_type: DataType {
+                    type_name: "BOOLEAN".to_string(),
+                    precision: None,
+                    scale: None,
+                    size: None,
+                    character_set: None,
+                    with_local_time_zone: None,
+                    fraction: None,
+                },
+            },
+            ColumnInfo {
+                name: "decimal_col".to_string(),
+                data_type: DataType {
+                    type_name: "DECIMAL".to_string(),
+                    precision: Some(10),
+                    scale: Some(2),
+                    size: None,
+                    character_set: None,
+                    with_local_time_zone: None,
+                    fraction: None,
+                },
+            },
+            ColumnInfo {
+                name: "double_col".to_string(),
+                data_type: DataType {
+                    type_name: "DOUBLE".to_string(),
+                    precision: None,
+                    scale: None,
+                    size: None,
+                    character_set: None,
+                    with_local_time_zone: None,
+                    fraction: None,
+                },
+            },
+            ColumnInfo {
+                name: "date_col".to_string(),
+                data_type: DataType {
+                    type_name: "DATE".to_string(),
+                    precision: None,
+                    scale: None,
+                    size: None,
+                    character_set: None,
+                    with_local_time_zone: None,
+                    fraction: None,
+                },
+            },
+        ];
+
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        let result_data = ResultData {
+            columns: columns.clone(),
+            rows: vec![
+                vec![
+                    json!(true),
+                    json!("123.45"),
+                    json!(std::f64::consts::PI),
+                    json!("2024-01-15"),
+                ],
+                vec![
+                    json!(false),
+                    json!("678.90"),
+                    json!(std::f64::consts::E),
+                    json!("2024-02-20"),
+                ],
+            ],
+            total_rows: 2,
+        };
+
+        let batch = converter.convert_to_record_batch_owned(result_data).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 4);
+    }
+
+    #[test]
+    fn test_convert_empty_result_owned() {
+        let columns = create_test_columns();
+        let converter = ArrowConverter::new(&columns).unwrap();
+
+        let result_data = ResultData {
+            columns: columns.clone(),
+            rows: vec![],
+            total_rows: 0,
+        };
+
+        let batch = converter.convert_to_record_batch_owned(result_data).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 3);
     }
 }

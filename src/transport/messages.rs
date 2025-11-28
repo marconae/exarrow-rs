@@ -327,7 +327,7 @@ pub struct ResultSetData {
 }
 
 /// Column metadata.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     /// Column name
@@ -337,23 +337,29 @@ pub struct ColumnInfo {
 }
 
 /// Exasol data type.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataType {
     /// Type name
     #[serde(rename = "type")]
     pub type_name: String,
     /// Precision (for numeric types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub precision: Option<i32>,
     /// Scale (for decimal types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scale: Option<i32>,
     /// Size (for string types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
     /// Character set (for string types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub character_set: Option<String>,
     /// With local time zone (for timestamp types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub with_local_time_zone: Option<bool>,
     /// Fraction (for interval types)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fraction: Option<i32>,
 }
 
@@ -438,6 +444,188 @@ impl CloseResultSetRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CloseResultSetResponse {
     /// Status of the response
+    pub status: String,
+    /// Exception information if failed
+    pub exception: Option<ExceptionInfo>,
+}
+
+// ============================================================================
+// Prepared Statement Messages
+// ============================================================================
+
+/// Request to create a prepared statement.
+///
+/// Sends SQL to the server for parsing and returns a statement handle
+/// along with parameter metadata.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePreparedStatementRequest {
+    /// Command name (always "createPreparedStatement")
+    pub command: String,
+    /// SQL text with parameter placeholders
+    pub sql_text: String,
+    /// Optional session attributes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<serde_json::Value>,
+}
+
+impl CreatePreparedStatementRequest {
+    /// Create a new prepared statement request.
+    ///
+    /// # Arguments
+    /// * `sql` - SQL text with parameter placeholders (?)
+    pub fn new(sql: impl Into<String>) -> Self {
+        Self {
+            command: "createPreparedStatement".to_string(),
+            sql_text: sql.into(),
+            attributes: None,
+        }
+    }
+
+    /// Set optional attributes.
+    pub fn with_attributes(mut self, attributes: serde_json::Value) -> Self {
+        self.attributes = Some(attributes);
+        self
+    }
+}
+
+/// Parameter metadata from prepared statement.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterInfo {
+    /// Data type of the parameter
+    pub data_type: DataType,
+}
+
+/// Parameter data in prepared statement response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterData {
+    /// Number of parameter columns
+    pub num_columns: i32,
+    /// Parameter column metadata
+    pub columns: Vec<ParameterInfo>,
+}
+
+/// Response from createPreparedStatement.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePreparedStatementResponse {
+    /// Status of the response ("ok" or "error")
+    pub status: String,
+    /// Response data containing statement handle and metadata
+    pub response_data: Option<PreparedStatementResponseData>,
+    /// Exception information if failed
+    pub exception: Option<ExceptionInfo>,
+}
+
+/// Response data containing statement handle and metadata.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedStatementResponseData {
+    /// Server-assigned statement handle
+    pub statement_handle: i32,
+    /// Parameter metadata (if statement has parameters)
+    pub parameter_data: Option<ParameterData>,
+    /// Number of results (for SELECT statements)
+    pub num_results: Option<i32>,
+    /// Result metadata (for SELECT statements)
+    pub results: Option<Vec<ResultSetInfo>>,
+}
+
+/// Request to execute a prepared statement.
+///
+/// Executes a previously prepared statement with optional parameter values.
+/// Parameters are provided in column-major format.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutePreparedStatementRequest {
+    /// Command name (always "executePreparedStatement")
+    pub command: String,
+    /// Statement handle from createPreparedStatement
+    pub statement_handle: i32,
+    /// Number of parameter columns
+    pub num_columns: i32,
+    /// Number of rows of parameters (for batch execution)
+    pub num_rows: i32,
+    /// Column metadata for parameters
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnInfo>>,
+    /// Parameter data in column-major format
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Vec<Vec<serde_json::Value>>>,
+    /// Optional session attributes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<serde_json::Value>,
+}
+
+impl ExecutePreparedStatementRequest {
+    /// Create a new execute prepared statement request.
+    ///
+    /// # Arguments
+    /// * `statement_handle` - Handle from createPreparedStatement
+    pub fn new(statement_handle: i32) -> Self {
+        Self {
+            command: "executePreparedStatement".to_string(),
+            statement_handle,
+            num_columns: 0,
+            num_rows: 0,
+            columns: None,
+            data: None,
+            attributes: None,
+        }
+    }
+
+    /// Set parameter data for execution.
+    ///
+    /// # Arguments
+    /// * `columns` - Column metadata describing parameter types
+    /// * `data` - Parameter values in column-major format (each inner Vec is one column)
+    pub fn with_data(mut self, columns: Vec<ColumnInfo>, data: Vec<Vec<serde_json::Value>>) -> Self {
+        self.num_columns = columns.len() as i32;
+        self.num_rows = if data.is_empty() { 0 } else { data[0].len() as i32 };
+        self.columns = Some(columns);
+        self.data = Some(data);
+        self
+    }
+
+    /// Set optional attributes.
+    pub fn with_attributes(mut self, attributes: serde_json::Value) -> Self {
+        self.attributes = Some(attributes);
+        self
+    }
+}
+
+/// Request to close a prepared statement.
+///
+/// Releases server-side resources associated with a prepared statement.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosePreparedStatementRequest {
+    /// Command name (always "closePreparedStatement")
+    pub command: String,
+    /// Statement handle to close
+    pub statement_handle: i32,
+}
+
+impl ClosePreparedStatementRequest {
+    /// Create a new close prepared statement request.
+    ///
+    /// # Arguments
+    /// * `statement_handle` - Handle from createPreparedStatement
+    pub fn new(statement_handle: i32) -> Self {
+        Self {
+            command: "closePreparedStatement".to_string(),
+            statement_handle,
+        }
+    }
+}
+
+/// Response from closePreparedStatement.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosePreparedStatementResponse {
+    /// Status of the response ("ok" or "error")
     pub status: String,
     /// Exception information if failed
     pub exception: Option<ExceptionInfo>,
@@ -799,5 +987,134 @@ mod tests {
         assert_eq!(session_info.protocol_version, 3);
         assert_eq!(session_info.max_data_message_size, 5242880);
         assert_eq!(session_info.time_zone.unwrap(), "Europe/Berlin");
+    }
+
+    // ========================================================================
+    // Prepared Statement Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_prepared_statement_request_serialization() {
+        let request = CreatePreparedStatementRequest::new("SELECT * FROM test WHERE id = ?");
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"command\":\"createPreparedStatement\""));
+        assert!(json.contains("\"sqlText\":\"SELECT * FROM test WHERE id = ?\""));
+        // Should not contain null attributes
+        assert!(!json.contains("\"attributes\":null"));
+    }
+
+    #[test]
+    fn test_create_prepared_statement_response_deserialization() {
+        let json = r#"{
+            "status": "ok",
+            "responseData": {
+                "statementHandle": 42,
+                "parameterData": {
+                    "numColumns": 1,
+                    "columns": [
+                        {
+                            "dataType": {
+                                "type": "DECIMAL",
+                                "precision": 18,
+                                "scale": 0
+                            }
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let response: CreatePreparedStatementResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.status, "ok");
+
+        let data = response.response_data.unwrap();
+        assert_eq!(data.statement_handle, 42);
+
+        let param_data = data.parameter_data.unwrap();
+        assert_eq!(param_data.num_columns, 1);
+        assert_eq!(param_data.columns.len(), 1);
+        assert_eq!(param_data.columns[0].data_type.type_name, "DECIMAL");
+    }
+
+    #[test]
+    fn test_execute_prepared_statement_request_serialization() {
+        let columns = vec![
+            ColumnInfo {
+                name: "ID".to_string(),
+                data_type: DataType {
+                    type_name: "DECIMAL".to_string(),
+                    precision: Some(18),
+                    scale: Some(0),
+                    size: None,
+                    character_set: None,
+                    with_local_time_zone: None,
+                    fraction: None,
+                },
+            },
+        ];
+        let data = vec![vec![serde_json::json!(1), serde_json::json!(2)]];
+
+        let request = ExecutePreparedStatementRequest::new(42)
+            .with_data(columns, data);
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"command\":\"executePreparedStatement\""));
+        assert!(json.contains("\"statementHandle\":42"));
+        assert!(json.contains("\"numColumns\":1"));
+        assert!(json.contains("\"numRows\":2"));
+        assert!(json.contains("\"columns\""));
+        assert!(json.contains("\"data\""));
+    }
+
+    #[test]
+    fn test_execute_prepared_statement_request_no_params() {
+        let request = ExecutePreparedStatementRequest::new(42);
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"command\":\"executePreparedStatement\""));
+        assert!(json.contains("\"statementHandle\":42"));
+        assert!(json.contains("\"numColumns\":0"));
+        assert!(json.contains("\"numRows\":0"));
+        // Should not contain null columns/data
+        assert!(!json.contains("\"columns\":null"));
+        assert!(!json.contains("\"data\":null"));
+    }
+
+    #[test]
+    fn test_close_prepared_statement_request_serialization() {
+        let request = ClosePreparedStatementRequest::new(42);
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"command\":\"closePreparedStatement\""));
+        assert!(json.contains("\"statementHandle\":42"));
+    }
+
+    #[test]
+    fn test_close_prepared_statement_response_deserialization() {
+        let json = r#"{
+            "status": "ok"
+        }"#;
+
+        let response: ClosePreparedStatementResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.status, "ok");
+        assert!(response.exception.is_none());
+    }
+
+    #[test]
+    fn test_close_prepared_statement_error_response() {
+        let json = r#"{
+            "status": "error",
+            "exception": {
+                "sqlCode": "00000",
+                "text": "Invalid statement handle"
+            }
+        }"#;
+
+        let response: ClosePreparedStatementResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.status, "error");
+
+        let exception = response.exception.unwrap();
+        assert!(exception.text.contains("Invalid statement handle"));
     }
 }
