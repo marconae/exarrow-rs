@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  EXASOL_HOST: localhost
+  EXASOL_PORT: 8563
+  EXASOL_USER: sys
+  EXASOL_PASSWORD: exasol
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Build with FFI
+        run: cargo build --release --features ffi
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run unit tests
+        run: cargo test --lib --verbose
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Start Exasol container
+        run: |
+          docker run -d \
+            --name exasol-test \
+            --privileged \
+            -p 8563:8563 \
+            exasol/docker-db:latest
+
+          echo "Waiting for Exasol to be ready..."
+          for i in {1..60}; do
+            if docker logs exasol-test 2>&1 | grep -q "Stage5: Starting EXAoperation"; then
+              echo "Exasol is ready!"
+              break
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 10
+          done
+
+          # Additional wait for database to be fully operational
+          sleep 30
+
+      - name: Build with FFI
+        run: cargo build --release --features ffi
+
+      - name: Run integration tests
+        run: cargo test --test integration_tests -- --ignored --test-threads=1
+
+      - name: Run driver manager tests
+        run: cargo test --test driver_manager_tests -- --ignored --test-threads=1
+
+      - name: Stop Exasol container
+        if: always()
+        run: |
+          docker stop exasol-test || true
+          docker rm exasol-test || true
