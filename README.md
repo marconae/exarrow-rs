@@ -1,9 +1,11 @@
 # exarrow-rs
 
-ADBC-compatible driver for Exasol with Apache Arrow data format support.
-
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
+> ADBC-compatible driver for Exasol with Apache Arrow data format support.
+
+*Community-maintained. Not officially supported by Exasol.*
 
 ## Overview
 
