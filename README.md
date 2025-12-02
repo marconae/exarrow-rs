@@ -1,5 +1,6 @@
 # exarrow-rs
 
+[![Crates.io](https://img.shields.io/crates/v/exarrow-rs)](https://crates.io/crates/exarrow-rs)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/marconae/exarrow-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/marconae/exarrow-rs/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/marconae/exarrow-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/marconae/exarrow-rs)
