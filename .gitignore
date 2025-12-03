@@ -31,7 +31,6 @@ tmp
 .env
 
 # Spec-driven development
-.spox
 specs/_archive
 
 # Exclude coding agents
