@@ -300,25 +300,24 @@ impl ResultSet {
         TypeMapper::exasol_to_arrow(&exasol_type, true)
     }
 
-    /// Convert column-major result data to RecordBatch.
+    /// Convert row-major result data to RecordBatch.
     ///
-    /// Exasol WebSocket API returns data in column-major format, where each
-    /// inner array represents all values for a single column, not a row.
+    /// Data is expected in row-major format where `data[row_idx][col_idx]` contains
+    /// the value at that position.
     ///
     /// Example: For a result with 2 columns (id, name) and 3 rows:
-    /// ```json
-    /// {
-    ///   "data": [
-    ///     [1, 2, 3],           // Column 0 (id): all row values
-    ///     ["a", "b", "c"]      // Column 1 (name): all row values
-    ///   ]
-    /// }
+    /// ```rust,ignore
+    /// // data[row_idx][col_idx]
+    /// data[0] = [1, "a"]    // Row 0
+    /// data[1] = [2, "b"]    // Row 1
+    /// data[2] = [3, "c"]    // Row 2
     /// ```
     fn column_major_to_record_batch(
         data: &ResultData,
         schema: &Arc<Schema>,
     ) -> Result<RecordBatch, ConversionError> {
         use arrow::array::*;
+        use serde_json::Value;
 
         if data.data.is_empty() {
             // Create empty batch with schema
@@ -332,19 +331,30 @@ impl ResultSet {
                 .map_err(|e| ConversionError::ArrowError(e.to_string()));
         }
 
+        // Extract column values from row-major data
+        let num_columns = schema.fields().len();
+        let column_values: Vec<Vec<&Value>> = (0..num_columns)
+            .map(|col_idx| {
+                data.data
+                    .iter()
+                    .map(|row| row.get(col_idx).unwrap_or(&Value::Null))
+                    .collect()
+            })
+            .collect();
+
         let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
 
         for (col_idx, field) in schema.fields().iter().enumerate() {
             use arrow::datatypes::DataType;
 
             // Get the column data (all values for this column)
-            let column_values = data.data.get(col_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+            let col_values = &column_values[col_idx];
 
             // Build array based on data type
             let array: Arc<dyn Array> = match field.data_type() {
                 DataType::Boolean => {
                     let mut builder = BooleanBuilder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(b) = value.as_bool() {
@@ -357,7 +367,7 @@ impl ResultSet {
                 }
                 DataType::Int32 => {
                     let mut builder = Int32Builder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(i) = value.as_i64() {
@@ -370,7 +380,7 @@ impl ResultSet {
                 }
                 DataType::Int64 => {
                     let mut builder = Int64Builder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(i) = value.as_i64() {
@@ -383,7 +393,7 @@ impl ResultSet {
                 }
                 DataType::Float64 => {
                     let mut builder = Float64Builder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(f) = value.as_f64() {
@@ -396,7 +406,7 @@ impl ResultSet {
                 }
                 DataType::Utf8 => {
                     let mut builder = StringBuilder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
@@ -413,7 +423,7 @@ impl ResultSet {
                         .with_precision_and_scale(*precision, *scale)
                         .map_err(|e| ConversionError::ArrowError(e.to_string()))?;
 
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
@@ -435,7 +445,7 @@ impl ResultSet {
                 }
                 DataType::Date32 => {
                     let mut builder = Date32Builder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
@@ -452,7 +462,7 @@ impl ResultSet {
                 }
                 DataType::Timestamp(_, _) => {
                     let mut builder = TimestampMicrosecondBuilder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
@@ -470,7 +480,7 @@ impl ResultSet {
                 _ => {
                     // Fallback to string for unsupported types
                     let mut builder = StringBuilder::new();
-                    for value in column_values {
+                    for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else {
@@ -797,9 +807,9 @@ mod tests {
         let mock_transport = MockTransport::new();
         let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
 
-        // Column-major data format:
-        // Column 0 (id): [1, 2]
-        // Column 1 (name): ["Alice", "Bob"]
+        // Row-major data format:
+        // Row 0: [1, "Alice"]
+        // Row 1: [2, "Bob"]
         let data = ResultData {
             columns: vec![
                 ColumnInfo {
@@ -828,8 +838,8 @@ mod tests {
                 },
             ],
             data: vec![
-                vec![serde_json::json!(1), serde_json::json!(2)], // Column 0: id values
-                vec![serde_json::json!("Alice"), serde_json::json!("Bob")], // Column 1: name values
+                vec![serde_json::json!(1), serde_json::json!("Alice")],
+                vec![serde_json::json!(2), serde_json::json!("Bob")],
             ],
             total_rows: 2,
         };
@@ -858,16 +868,22 @@ mod tests {
             Field::new("active", arrow::datatypes::DataType::Boolean, true),
         ]));
 
-        // Column-major data format:
-        // Column 0 (id): [1, 2]
-        // Column 1 (name): ["Alice", "Bob"]
-        // Column 2 (active): [true, false]
+        // Row-major data format:
+        // Row 0: [1, "Alice", true]
+        // Row 1: [2, "Bob", false]
         let data = ResultData {
             columns: vec![],
             data: vec![
-                vec![serde_json::json!(1), serde_json::json!(2)], // Column 0
-                vec![serde_json::json!("Alice"), serde_json::json!("Bob")], // Column 1
-                vec![serde_json::json!(true), serde_json::json!(false)], // Column 2
+                vec![
+                    serde_json::json!(1),
+                    serde_json::json!("Alice"),
+                    serde_json::json!(true),
+                ],
+                vec![
+                    serde_json::json!(2),
+                    serde_json::json!("Bob"),
+                    serde_json::json!(false),
+                ],
             ],
             total_rows: 2,
         };
@@ -887,11 +903,11 @@ mod tests {
             true,
         )]));
 
-        // Column-major: one column with one value
+        // Row-major: one row with one value
         let data = ResultData {
             columns: vec![],
             data: vec![
-                vec![serde_json::json!(42)], // Column 0: answer = [42]
+                vec![serde_json::json!(42)], // Row 0: [42]
             ],
             total_rows: 1,
         };
@@ -914,12 +930,11 @@ mod tests {
             Field::new("greeting", arrow::datatypes::DataType::Utf8, true),
         ]));
 
-        // Column-major: two columns, each with one value
+        // Row-major: one row with two values
         let data = ResultData {
             columns: vec![],
             data: vec![
-                vec![serde_json::json!(42)],      // Column 0: answer = [42]
-                vec![serde_json::json!("hello")], // Column 1: greeting = ["hello"]
+                vec![serde_json::json!(42), serde_json::json!("hello")], // Row 0: [42, "hello"]
             ],
             total_rows: 1,
         };
@@ -938,36 +953,20 @@ mod tests {
             Field::new("label", arrow::datatypes::DataType::Utf8, true),
         ]));
 
-        // Column-major: two columns, each with ten values
+        // Row-major: ten rows, each with two values
         let data = ResultData {
             columns: vec![],
             data: vec![
-                vec![
-                    // Column 0: id values
-                    serde_json::json!(1),
-                    serde_json::json!(2),
-                    serde_json::json!(3),
-                    serde_json::json!(4),
-                    serde_json::json!(5),
-                    serde_json::json!(6),
-                    serde_json::json!(7),
-                    serde_json::json!(8),
-                    serde_json::json!(9),
-                    serde_json::json!(10),
-                ],
-                vec![
-                    // Column 1: label values
-                    serde_json::json!("Row 1"),
-                    serde_json::json!("Row 2"),
-                    serde_json::json!("Row 3"),
-                    serde_json::json!("Row 4"),
-                    serde_json::json!("Row 5"),
-                    serde_json::json!("Row 6"),
-                    serde_json::json!("Row 7"),
-                    serde_json::json!("Row 8"),
-                    serde_json::json!("Row 9"),
-                    serde_json::json!("Row 10"),
-                ],
+                vec![serde_json::json!(1), serde_json::json!("Row 1")],
+                vec![serde_json::json!(2), serde_json::json!("Row 2")],
+                vec![serde_json::json!(3), serde_json::json!("Row 3")],
+                vec![serde_json::json!(4), serde_json::json!("Row 4")],
+                vec![serde_json::json!(5), serde_json::json!("Row 5")],
+                vec![serde_json::json!(6), serde_json::json!("Row 6")],
+                vec![serde_json::json!(7), serde_json::json!("Row 7")],
+                vec![serde_json::json!(8), serde_json::json!("Row 8")],
+                vec![serde_json::json!(9), serde_json::json!("Row 9")],
+                vec![serde_json::json!(10), serde_json::json!("Row 10")],
             ],
             total_rows: 10,
         };

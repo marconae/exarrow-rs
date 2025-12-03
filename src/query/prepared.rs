@@ -1,37 +1,31 @@
 //! Prepared statement handling for parameterized queries.
 //!
-//! This module provides the `PreparedStatement` type for executing
-//! parameterized queries using Exasol's native prepared statement protocol.
+//! This module provides the `PreparedStatement` type as a data container for
+//! server-side prepared statements. Execution is handled by Connection.
 
 use crate::error::QueryError;
-use crate::query::results::ResultSet;
 use crate::query::statement::Parameter;
 use crate::transport::messages::DataType;
-use crate::transport::protocol::{PreparedStatementHandle, QueryResult};
-use crate::transport::TransportProtocol;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use crate::transport::protocol::PreparedStatementHandle;
 
 /// A prepared statement for parameterized query execution.
 ///
-/// PreparedStatement uses Exasol's native prepared statement protocol
-/// for secure, efficient parameterized queries. Parameters are sent
-/// separately from SQL text, eliminating SQL injection risks.
+/// PreparedStatement stores the server-side statement handle and parameter values.
+/// Execution is performed by Connection, not by PreparedStatement itself.
 ///
 /// # Example
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // PreparedStatement is typically created via Statement::prepare()
-/// // let prepared = statement.prepare().await?;
+/// // PreparedStatement is created via Connection::prepare()
+/// // let mut prepared = connection.prepare("SELECT * FROM users WHERE id = ?").await?;
 /// // prepared.bind(0, 42)?;
-/// // let results = prepared.execute().await?;
+/// // let results = connection.execute_prepared(&prepared).await?;
+/// // connection.close_prepared(prepared).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct PreparedStatement {
-    /// Transport layer for communication
-    transport: Arc<Mutex<dyn TransportProtocol>>,
     /// Server-side prepared statement handle
     handle: PreparedStatementHandle,
     /// Bound parameter values (column-major format for batch execution)
@@ -42,13 +36,9 @@ pub struct PreparedStatement {
 
 impl PreparedStatement {
     /// Create a new PreparedStatement from a handle.
-    pub(crate) fn new(
-        transport: Arc<Mutex<dyn TransportProtocol>>,
-        handle: PreparedStatementHandle,
-    ) -> Self {
+    pub(crate) fn new(handle: PreparedStatementHandle) -> Self {
         let num_params = handle.num_params as usize;
         Self {
-            transport,
             handle,
             parameters: vec![None; num_params],
             closed: false,
@@ -65,14 +55,24 @@ impl PreparedStatement {
         &self.handle.parameter_types
     }
 
-    /// Get the statement handle.
+    /// Get the statement handle ID.
     pub fn handle(&self) -> i32 {
         self.handle.handle
+    }
+
+    /// Get the full handle (for Connection use).
+    pub(crate) fn handle_ref(&self) -> &PreparedStatementHandle {
+        &self.handle
     }
 
     /// Check if the prepared statement has been closed.
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// Mark the prepared statement as closed (called by Connection).
+    pub(crate) fn mark_closed(&mut self) {
+        self.closed = true;
     }
 
     /// Bind a parameter value at the given index.
@@ -105,72 +105,15 @@ impl PreparedStatement {
         }
     }
 
-    /// Execute the prepared statement and return results.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Not all parameters are bound
-    /// - The statement has been closed
-    /// - Execution fails on the server
-    pub async fn execute(&mut self) -> Result<ResultSet, QueryError> {
-        if self.closed {
-            return Err(QueryError::StatementClosed);
-        }
-
-        // Convert parameters to column-major JSON format
-        let params_data = self.build_parameters_data()?;
-
-        let mut transport = self.transport.lock().await;
-        let result = transport
-            .execute_prepared_statement(&self.handle, params_data)
-            .await
-            .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
-
-        drop(transport);
-
-        ResultSet::from_transport_result(result, Arc::clone(&self.transport))
-    }
-
-    /// Execute the prepared statement and return the number of affected rows.
-    ///
-    /// Use this for INSERT, UPDATE, DELETE statements.
-    pub async fn execute_update(&mut self) -> Result<i64, QueryError> {
-        if self.closed {
-            return Err(QueryError::StatementClosed);
-        }
-
-        let params_data = self.build_parameters_data()?;
-
-        let mut transport = self.transport.lock().await;
-        let result = transport
-            .execute_prepared_statement(&self.handle, params_data)
-            .await
-            .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
-
-        match result {
-            QueryResult::RowCount { count } => Ok(count),
-            QueryResult::ResultSet { .. } => Err(QueryError::UnexpectedResultSet),
-        }
-    }
-
-    /// Close the prepared statement and release server-side resources.
-    pub async fn close(&mut self) -> Result<(), QueryError> {
-        if self.closed {
-            return Ok(());
-        }
-
-        let mut transport = self.transport.lock().await;
-        transport
-            .close_prepared_statement(&self.handle)
-            .await
-            .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
-
-        self.closed = true;
-        Ok(())
+    /// Get bound parameters.
+    pub fn parameters(&self) -> &[Option<Parameter>] {
+        &self.parameters
     }
 
     /// Build parameters data in column-major format for the protocol.
-    fn build_parameters_data(&self) -> Result<Option<Vec<Vec<serde_json::Value>>>, QueryError> {
+    ///
+    /// This is used internally by Connection when executing prepared statements.
+    pub fn build_parameters_data(&self) -> Result<Option<Vec<Vec<serde_json::Value>>>, QueryError> {
         if self.parameters.is_empty() {
             return Ok(None);
         }
@@ -197,7 +140,7 @@ impl PreparedStatement {
 }
 
 /// Convert a Parameter to JSON value for the wire protocol.
-fn parameter_to_json(param: &Parameter) -> serde_json::Value {
+pub(crate) fn parameter_to_json(param: &Parameter) -> serde_json::Value {
     match param {
         Parameter::Null => serde_json::Value::Null,
         Parameter::Boolean(b) => serde_json::Value::Bool(*b),
@@ -208,16 +151,26 @@ fn parameter_to_json(param: &Parameter) -> serde_json::Value {
     }
 }
 
+impl std::fmt::Debug for PreparedStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedStatement")
+            .field("handle", &self.handle.handle)
+            .field("parameter_count", &self.parameter_count())
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
 impl Drop for PreparedStatement {
     fn drop(&mut self) {
         // Note: We can't do async cleanup in Drop.
-        // Users should call close() explicitly for proper cleanup.
+        // Users should call Connection::close_prepared() explicitly for proper cleanup.
         // The server will eventually clean up orphaned statements.
         if !self.closed {
             // Log a warning in debug builds
             #[cfg(debug_assertions)]
             eprintln!(
-                "Warning: PreparedStatement {} dropped without calling close()",
+                "Warning: PreparedStatement {} dropped without calling close_prepared()",
                 self.handle.handle
             );
         }
@@ -228,31 +181,6 @@ impl Drop for PreparedStatement {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::transport::messages::{ColumnInfo, ResultData, ResultSetHandle};
-    use crate::transport::protocol::{ConnectionParams, Credentials, QueryResult};
-    use async_trait::async_trait;
-    use mockall::mock;
-
-    // Mock transport for testing
-    mock! {
-        pub Transport {}
-
-        #[async_trait]
-        impl TransportProtocol for Transport {
-            async fn connect(&mut self, params: &ConnectionParams) -> Result<(), crate::error::TransportError>;
-            async fn authenticate(&mut self, credentials: &Credentials) -> Result<crate::transport::messages::SessionInfo, crate::error::TransportError>;
-            async fn execute_query(&mut self, sql: &str) -> Result<QueryResult, crate::error::TransportError>;
-            async fn fetch_results(&mut self, handle: ResultSetHandle) -> Result<ResultData, crate::error::TransportError>;
-            async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), crate::error::TransportError>;
-            async fn create_prepared_statement(&mut self, sql: &str) -> Result<PreparedStatementHandle, crate::error::TransportError>;
-            async fn execute_prepared_statement(&mut self, handle: &PreparedStatementHandle, parameters: Option<Vec<Vec<serde_json::Value>>>) -> Result<QueryResult, crate::error::TransportError>;
-            async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
-            async fn close(&mut self) -> Result<(), crate::error::TransportError>;
-            fn is_connected(&self) -> bool;
-        }
-    }
-
-    // Note: Full tests require mock transport which is tested in integration tests
 
     #[test]
     fn test_parameter_to_json() {
@@ -279,11 +207,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_creation() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_creation() {
         let handle = PreparedStatementHandle::new(
             42,
             2,
@@ -309,7 +234,7 @@ mod tests {
             ],
         );
 
-        let stmt = PreparedStatement::new(transport, handle);
+        let stmt = PreparedStatement::new(handle);
 
         assert_eq!(stmt.handle(), 42);
         assert_eq!(stmt.parameter_count(), 2);
@@ -317,25 +242,19 @@ mod tests {
         assert!(!stmt.is_closed());
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_bind_valid() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_bind_valid() {
         let handle = PreparedStatementHandle::new(1, 2, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
+        let mut stmt = PreparedStatement::new(handle);
 
         assert!(stmt.bind(0, 42).is_ok());
         assert!(stmt.bind(1, "test").is_ok());
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_bind_out_of_bounds() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_bind_out_of_bounds() {
         let handle = PreparedStatementHandle::new(1, 2, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
+        let mut stmt = PreparedStatement::new(handle);
 
         let result = stmt.bind(5, 42);
         assert!(result.is_err());
@@ -345,13 +264,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_clear_parameters() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_clear_parameters() {
         let handle = PreparedStatementHandle::new(1, 2, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
+        let mut stmt = PreparedStatement::new(handle);
 
         stmt.bind(0, 42).unwrap();
         stmt.bind(1, "test").unwrap();
@@ -363,13 +279,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_build_params_unbound() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_build_params_unbound() {
         let handle = PreparedStatementHandle::new(1, 2, vec![]);
-        let stmt = PreparedStatement::new(transport, handle);
+        let stmt = PreparedStatement::new(handle);
 
         let result = stmt.build_parameters_data();
         assert!(result.is_err());
@@ -379,13 +292,10 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_build_params_success() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_build_params_success() {
         let handle = PreparedStatementHandle::new(1, 2, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
+        let mut stmt = PreparedStatement::new(handle);
 
         stmt.bind(0, 42).unwrap();
         stmt.bind(1, "test").unwrap();
@@ -399,155 +309,15 @@ mod tests {
         assert_eq!(columns[1], vec![serde_json::json!("test")]);
     }
 
-    #[tokio::test]
-    async fn test_prepared_statement_execute_closed() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
+    #[test]
+    fn test_prepared_statement_no_params() {
         let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-        stmt.closed = true;
+        let stmt = PreparedStatement::new(handle);
 
-        let result = stmt.execute().await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), QueryError::StatementClosed));
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_execute_update_closed() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-        stmt.closed = true;
-
-        let result = stmt.execute_update().await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), QueryError::StatementClosed));
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_close_already_closed() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-        stmt.closed = true;
-
-        // Should succeed without calling transport
-        let result = stmt.close().await;
+        assert_eq!(stmt.parameter_count(), 0);
+        let result = stmt.build_parameters_data();
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_close_success() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_close_prepared_statement()
-            .times(1)
-            .returning(|_| Ok(()));
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-
-        let result = stmt.close().await;
-        assert!(result.is_ok());
-        assert!(stmt.is_closed());
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_execute_update_success() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_execute_prepared_statement()
-            .times(1)
-            .returning(|_, _| Ok(QueryResult::RowCount { count: 5 }));
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-
-        let result = stmt.execute_update().await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 5);
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_execute_update_unexpected_result_set() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_execute_prepared_statement()
-            .times(1)
-            .returning(|_, _| {
-                Ok(QueryResult::ResultSet {
-                    handle: None,
-                    data: ResultData {
-                        columns: vec![],
-                        data: vec![],
-                        total_rows: 0,
-                    },
-                })
-            });
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-
-        let result = stmt.execute_update().await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            QueryError::UnexpectedResultSet
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_execute_with_params() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_execute_prepared_statement()
-            .times(1)
-            .returning(|_, _| {
-                Ok(QueryResult::ResultSet {
-                    handle: None,
-                    data: ResultData {
-                        columns: vec![ColumnInfo {
-                            name: "result".to_string(),
-                            data_type: DataType {
-                                type_name: "DECIMAL".to_string(),
-                                precision: Some(18),
-                                scale: Some(0),
-                                size: None,
-                                character_set: None,
-                                with_local_time_zone: None,
-                                fraction: None,
-                            },
-                        }],
-                        data: vec![vec![serde_json::json!(1)]],
-                        total_rows: 1,
-                    },
-                })
-            });
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 1, vec![]);
-        let mut stmt = PreparedStatement::new(transport, handle);
-
-        stmt.bind(0, 42).unwrap();
-
-        let result = stmt.execute().await;
-        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -608,19 +378,5 @@ mod tests {
             parameter_to_json(&Parameter::Binary(vec![0x00, 0xFF])),
             serde_json::json!("00ff")
         );
-    }
-
-    #[tokio::test]
-    async fn test_prepared_statement_no_params() {
-        let mock_transport = MockTransport::new();
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
-        let stmt = PreparedStatement::new(transport, handle);
-
-        assert_eq!(stmt.parameter_count(), 0);
-        let result = stmt.build_parameters_data();
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
     }
 }

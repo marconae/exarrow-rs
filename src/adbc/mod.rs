@@ -3,13 +3,20 @@
 //! This module provides the ADBC-compatible interface for the exarrow-rs driver,
 //! offering a high-level API for connecting to Exasol databases and executing queries.
 //!
+//! # v2.0.0 Breaking Changes
+//!
+//! - Connection now owns the transport directly
+//! - `create_statement()` is now synchronous and returns a pure data container
+//! - Use `execute_statement()` instead of `Statement::execute()`
+//! - Use `Connection::prepare()` instead of `Statement::prepare()`
+//!
 //! # Architecture
 //!
 //! The ADBC interface is organized into four main components:
 //! - `Driver` - Driver metadata and factory for creating databases
 //! - `Database` - Database connection factory with connection string parsing
 //! - `Connection` - Active database connection for executing queries
-//! - `Statement` - SQL statement execution with parameter binding
+//! - `Statement` - SQL statement data container with parameter binding
 //!
 //! # Example
 //!
@@ -24,11 +31,14 @@
 //! let database = driver.open("exasol://user:pass@localhost:8563")?;
 //!
 //! // Connect
-//! let connection = database.connect().await?;
+//! let mut connection = database.connect().await?;
 //!
-//! // Execute query
-//! let mut statement = connection.create_statement("SELECT * FROM my_table").await?;
-//! let results = statement.execute().await?;
+//! // Execute query (new API)
+//! let stmt = connection.create_statement("SELECT * FROM my_table");
+//! let results = connection.execute_statement(&stmt).await?;
+//!
+//! // Or use convenience method
+//! let results = connection.execute("SELECT * FROM my_table").await?;
 //!
 //! // Close connection
 //! connection.close().await?;
@@ -45,7 +55,7 @@ pub mod statement;
 pub use connection::Connection;
 pub use database::Database;
 pub use driver::Driver;
-pub use statement::Statement;
+pub use statement::{Parameter, Statement, StatementType};
 
 #[cfg(test)]
 mod tests {

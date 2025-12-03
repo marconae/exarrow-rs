@@ -23,14 +23,14 @@ async fn example_connection() -> Result<Connection, Box<dyn Error>> {
 }
 
 /// Executes a simple arithmetic query and returns the row count.
-async fn example_simple_select(conn: &Connection) -> Result<usize, Box<dyn Error>> {
+async fn example_simple_select(conn: &mut Connection) -> Result<usize, Box<dyn Error>> {
     let results = conn.query("SELECT 1+1").await?;
     let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
     Ok(row_count)
 }
 
 /// Demonstrates a full transaction: create schema, table, insert, commit, select, cleanup.
-async fn example_transaction(conn: &Connection) -> Result<usize, Box<dyn Error>> {
+async fn example_transaction(conn: &mut Connection) -> Result<usize, Box<dyn Error>> {
     // Create schema if it doesn't exist (ignore error if already exists)
     let _ = conn
         .execute_update(&format!("CREATE SCHEMA {}", SCHEMA))
@@ -80,13 +80,13 @@ async fn example_transaction(conn: &Connection) -> Result<usize, Box<dyn Error>>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let conn = example_connection().await?;
+    let mut conn = example_connection().await?;
     println!("Connected: session {}", conn.session_id());
 
-    let rows = example_simple_select(&conn).await?;
+    let rows = example_simple_select(&mut conn).await?;
     println!("Simple select: {} row(s)", rows);
 
-    let rows = example_transaction(&conn).await?;
+    let rows = example_transaction(&mut conn).await?;
     println!("Transaction: {} row(s)", rows);
 
     conn.close().await?;

@@ -545,7 +545,7 @@ async fn test_driver_manager_matches_direct_api() {
     skip_if_no_exasol!();
 
     // First, get results via direct API
-    let direct_conn = common::get_test_connection()
+    let mut direct_conn = common::get_test_connection()
         .await
         .expect("Failed to connect via direct API");
 
