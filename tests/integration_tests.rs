@@ -1847,7 +1847,7 @@ async fn test_prepared_select_with_parameters() {
         .execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await;
     conn.execute_update(&format!(
-        "CREATE TABLE {}.test_select (id INT, value INT)",
+        "CREATE TABLE {}.test_select (id INT, val INT)",
         schema_name
     ))
     .await
@@ -1864,7 +1864,7 @@ async fn test_prepared_select_with_parameters() {
     // Select with parameter
     let select_stmt = conn
         .create_statement(&format!(
-            "SELECT value FROM {}.test_select WHERE id = ?",
+            "SELECT val FROM {}.test_select WHERE id = ?",
             schema_name
         ))
         .await

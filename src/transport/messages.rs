@@ -363,6 +363,80 @@ pub struct DataType {
     pub fraction: Option<i32>,
 }
 
+impl DataType {
+    /// Create a DECIMAL type with specified precision and scale.
+    pub fn decimal(precision: i32, scale: i32) -> Self {
+        Self {
+            type_name: "DECIMAL".to_string(),
+            precision: Some(precision),
+            scale: Some(scale),
+            size: None,
+            character_set: None,
+            with_local_time_zone: None,
+            fraction: None,
+        }
+    }
+
+    /// Create a DOUBLE type.
+    pub fn double() -> Self {
+        Self {
+            type_name: "DOUBLE".to_string(),
+            precision: None,
+            scale: None,
+            size: None,
+            character_set: None,
+            with_local_time_zone: None,
+            fraction: None,
+        }
+    }
+
+    /// Create a VARCHAR type with specified size.
+    pub fn varchar(size: i64) -> Self {
+        Self {
+            type_name: "VARCHAR".to_string(),
+            precision: None,
+            scale: None,
+            size: Some(size),
+            character_set: Some("UTF8".to_string()),
+            with_local_time_zone: None,
+            fraction: None,
+        }
+    }
+
+    /// Create a BOOLEAN type.
+    pub fn boolean() -> Self {
+        Self {
+            type_name: "BOOLEAN".to_string(),
+            precision: None,
+            scale: None,
+            size: None,
+            character_set: None,
+            with_local_time_zone: None,
+            fraction: None,
+        }
+    }
+
+    /// Infer a DataType from a JSON value.
+    /// Used when parameter types are not provided by the server.
+    pub fn infer_from_json(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => Self::varchar(2_000_000),
+            serde_json::Value::Bool(_) => Self::boolean(),
+            serde_json::Value::Number(n) => {
+                if n.is_f64() {
+                    Self::double()
+                } else {
+                    // Integer - use DECIMAL(18, 0) to handle large integers
+                    Self::decimal(18, 0)
+                }
+            }
+            serde_json::Value::String(_) => Self::varchar(2_000_000),
+            // Arrays and objects are serialized as strings
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => Self::varchar(2_000_000),
+        }
+    }
+}
+
 // ============================================================================
 // Fetch Messages
 // ============================================================================
@@ -1142,5 +1216,86 @@ mod tests {
 
         let exception = response.exception.unwrap();
         assert!(exception.text.contains("Invalid statement handle"));
+    }
+
+    // ========================================================================
+    // DataType Helper Tests
+    // ========================================================================
+
+    #[test]
+    fn test_data_type_decimal() {
+        let dt = DataType::decimal(18, 0);
+        assert_eq!(dt.type_name, "DECIMAL");
+        assert_eq!(dt.precision, Some(18));
+        assert_eq!(dt.scale, Some(0));
+        assert!(dt.size.is_none());
+    }
+
+    #[test]
+    fn test_data_type_double() {
+        let dt = DataType::double();
+        assert_eq!(dt.type_name, "DOUBLE");
+        assert!(dt.precision.is_none());
+        assert!(dt.scale.is_none());
+    }
+
+    #[test]
+    fn test_data_type_varchar() {
+        let dt = DataType::varchar(2_000_000);
+        assert_eq!(dt.type_name, "VARCHAR");
+        assert_eq!(dt.size, Some(2_000_000));
+        assert_eq!(dt.character_set, Some("UTF8".to_string()));
+    }
+
+    #[test]
+    fn test_data_type_boolean() {
+        let dt = DataType::boolean();
+        assert_eq!(dt.type_name, "BOOLEAN");
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_null() {
+        let dt = DataType::infer_from_json(&serde_json::Value::Null);
+        assert_eq!(dt.type_name, "VARCHAR");
+        assert_eq!(dt.size, Some(2_000_000));
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_bool() {
+        let dt = DataType::infer_from_json(&serde_json::json!(true));
+        assert_eq!(dt.type_name, "BOOLEAN");
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_integer() {
+        let dt = DataType::infer_from_json(&serde_json::json!(42));
+        assert_eq!(dt.type_name, "DECIMAL");
+        assert_eq!(dt.precision, Some(18));
+        assert_eq!(dt.scale, Some(0));
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_float() {
+        let dt = DataType::infer_from_json(&serde_json::json!(3.125));
+        assert_eq!(dt.type_name, "DOUBLE");
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_string() {
+        let dt = DataType::infer_from_json(&serde_json::json!("hello"));
+        assert_eq!(dt.type_name, "VARCHAR");
+        assert_eq!(dt.size, Some(2_000_000));
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_array() {
+        let dt = DataType::infer_from_json(&serde_json::json!([1, 2, 3]));
+        assert_eq!(dt.type_name, "VARCHAR");
+    }
+
+    #[test]
+    fn test_data_type_infer_from_json_object() {
+        let dt = DataType::infer_from_json(&serde_json::json!({"key": "value"}));
+        assert_eq!(dt.type_name, "VARCHAR");
     }
 }

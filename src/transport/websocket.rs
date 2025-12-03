@@ -452,19 +452,36 @@ impl TransportProtocol for WebSocketTransport {
         let mut request = ExecutePreparedStatementRequest::new(handle.handle);
 
         // Add parameters if provided
-        if let Some(data) = parameters {
-            // Build column info from the handle's parameter types
-            let columns: Vec<_> = handle
-                .parameter_types
-                .iter()
-                .enumerate()
-                .map(|(i, dt)| super::messages::ColumnInfo {
-                    name: format!("param{}", i),
-                    data_type: dt.clone(),
-                })
-                .collect();
+        if let Some(ref data) = parameters {
+            // Build column info from the handle's parameter types, or infer from values
+            let columns: Vec<_> = if handle.parameter_types.is_empty() {
+                // Infer types from the first row of parameter values
+                data.iter()
+                    .enumerate()
+                    .map(|(i, col_values)| {
+                        let data_type = col_values
+                            .first()
+                            .map(super::messages::DataType::infer_from_json)
+                            .unwrap_or_else(|| super::messages::DataType::varchar(2_000_000));
+                        super::messages::ColumnInfo {
+                            name: format!("param{}", i),
+                            data_type,
+                        }
+                    })
+                    .collect()
+            } else {
+                handle
+                    .parameter_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, dt)| super::messages::ColumnInfo {
+                        name: format!("param{}", i),
+                        data_type: dt.clone(),
+                    })
+                    .collect()
+            };
 
-            request = request.with_data(columns, data);
+            request = request.with_data(columns, data.clone());
         }
 
         // Send execute prepared statement request

@@ -6,10 +6,9 @@
 use crate::error::ConversionError;
 use crate::types::ExasolType;
 use arrow::array::{
-    ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Decimal256Builder,
-    Float64Builder, IntervalMonthDayNanoBuilder, StringBuilder, TimestampMicrosecondBuilder,
+    ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder,
+    IntervalMonthDayNanoBuilder, StringBuilder, TimestampMicrosecondBuilder,
 };
-use arrow::datatypes::i256;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -49,12 +48,9 @@ pub fn build_array(
     match exasol_type {
         ExasolType::Boolean => build_boolean_array(values, column),
         ExasolType::Char { .. } | ExasolType::Varchar { .. } => build_string_array(values, column),
+        // Exasol DECIMAL precision is 1-36; always fits in Decimal128
         ExasolType::Decimal { precision, scale } => {
-            if *precision <= 38 {
-                build_decimal128_array(values, *precision, *scale, column)
-            } else {
-                build_decimal256_array(values, *precision, *scale, column)
-            }
+            build_decimal128_array(values, *precision, *scale, column)
         }
         ExasolType::Double => build_double_array(values, column),
         ExasolType::Date => build_date_array(values, column),
@@ -213,29 +209,6 @@ fn build_decimal128_array(
     Ok(Arc::new(builder.finish()))
 }
 
-/// Build a Decimal256 array for high-precision decimals.
-fn build_decimal256_array(
-    values: &[Value],
-    precision: u8,
-    scale: i8,
-    column: usize,
-) -> Result<ArrayRef, ConversionError> {
-    let mut builder = Decimal256Builder::with_capacity(values.len())
-        .with_precision_and_scale(precision, scale)
-        .map_err(|e| ConversionError::ArrowError(e.to_string()))?;
-
-    for (row, value) in values.iter().enumerate() {
-        if value.is_null() {
-            builder.append_null();
-        } else {
-            let decimal_value = parse_decimal_to_i256(value, precision, scale, row, column)?;
-            builder.append_value(decimal_value);
-        }
-    }
-
-    Ok(Arc::new(builder.finish()))
-}
-
 /// Parse a JSON value to i128 for Decimal128.
 fn parse_decimal_to_i128(
     value: &Value,
@@ -321,24 +294,6 @@ fn parse_decimal_to_i128(
     }
 
     Ok(result)
-}
-
-/// Parse a JSON value to i256 for Decimal256.
-fn parse_decimal_to_i256(
-    value: &Value,
-    precision: u8,
-    scale: i8,
-    row: usize,
-    column: usize,
-) -> Result<i256, ConversionError> {
-    // Validate precision for string values
-    if let Some(s) = value.as_str() {
-        validate_decimal_precision(s, precision, scale, row, column)?;
-    }
-    // Parse string and create i256
-    // For i256, we need to handle this differently as it's a more complex type
-    let i128_value = parse_decimal_to_i128(value, precision, scale, row, column)?;
-    Ok(i256::from_i128(i128_value))
 }
 
 /// Build a Float64 array.

@@ -172,4 +172,6 @@ Arrow conversion handles this directly without transposition.
     - `test:` for test additions/changes
     - `docs:` for documentation
     - `chore:` for maintenance tasks
+    - `spec:` for spec changes
+- **Breaking Changes**: Use `BREAKING CHANGE:` in commit footer
 - **Pull Requests**: Required for all changes to main

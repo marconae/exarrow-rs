@@ -1,0 +1,5 @@
+# Spec Oxide Configuration
+
+spec_folder = "specs/"
+changes_folder = "specs/_changes"
+archive_folder = "specs/_archive"

@@ -98,6 +98,16 @@ RUN mkdir -p /home/$USERNAME/.claude
 # Install OpenSpec CLI (pinned version for caching)
 RUN npm install -g @fission-ai/openspec@0.16.0
 
+# Install Context7 MCP server (npm package)
+RUN npm install -g @upstash/context7-mcp
+
+# Install uv (Python package manager) for Serena MCP server
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/$USERNAME/.local/bin:$PATH"
+
+# Pre-install Serena MCP server dependencies (cached for faster startup)
+RUN uv tool install git+https://github.com/oraios/serena
+
 # Set shell and editor preferences
 ENV SHELL=/bin/bash
 ENV EDITOR=vim
@@ -106,11 +116,11 @@ ENV VISUAL=vim
 # Add PATH to bashrc and profile for SSH sessions (ENV vars don't persist in SSH)
 # .profile is sourced for login shells, .bashrc for interactive non-login shells
 # Also fix cargo env sourcing to be conditional (avoids errors when file doesn't exist)
-RUN echo 'export PATH="/home/coder/.cargo/bin:/usr/local/share/npm-global/bin:$PATH"' >> /home/$USERNAME/.bashrc \
+RUN echo 'export PATH="/home/coder/.local/bin:/home/coder/.cargo/bin:/usr/local/share/npm-global/bin:$PATH"' >> /home/$USERNAME/.bashrc \
     && echo 'export CARGO_HOME="/home/coder/.cargo"' >> /home/$USERNAME/.bashrc \
     && echo 'export RUSTUP_HOME="/home/coder/.rustup"' >> /home/$USERNAME/.bashrc \
     && echo 'export NPM_CONFIG_PREFIX=/usr/local/share/npm-global' >> /home/$USERNAME/.bashrc \
-    && echo 'export PATH="/home/coder/.cargo/bin:/usr/local/share/npm-global/bin:$PATH"' >> /home/$USERNAME/.profile \
+    && echo 'export PATH="/home/coder/.local/bin:/home/coder/.cargo/bin:/usr/local/share/npm-global/bin:$PATH"' >> /home/$USERNAME/.profile \
     && echo 'export NPM_CONFIG_PREFIX=/usr/local/share/npm-global' >> /home/$USERNAME/.profile \
     && sed -i 's|^\. "\$HOME/.cargo/env"$|[ -f "\$HOME/.cargo/env" ] \&\& . "\$HOME/.cargo/env"|g' /home/$USERNAME/.profile /home/$USERNAME/.bashrc
 
