@@ -31,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-exarrow-rs = "1.0"
+exarrow-rs = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database = driver.open("exasol://sys:exasol@localhost:8563/my_schema")?;
     let mut connection = database.connect().await?;
 
-    // Execute a query
+    // Execute a query (convenience method)
     let results = connection.query("SELECT * FROM customers WHERE age > 25").await?;
 
     // Process results as Arrow RecordBatches
@@ -58,10 +58,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Schema: {:?}", batch.schema());
     }
 
-    // Execute with parameters
-    let mut stmt = connection.create_statement("SELECT * FROM orders WHERE customer_id = ?").await?;
+    // Execute with parameters using Statement
+    let mut stmt = connection.create_statement("SELECT * FROM orders WHERE customer_id = ?");
     stmt.bind(0, 12345)?;
-    let results = stmt.execute().await?;
+    let results = connection.execute_statement(&stmt).await?;
+
+    // Or use prepared statements for repeated execution
+    let mut prepared = connection.prepare("SELECT * FROM orders WHERE status = ?").await?;
+    prepared.bind(0, "pending")?;
+    let results = connection.execute_prepared(&prepared).await?;
+    connection.close_prepared(prepared).await?;
 
     // Transaction support
     connection.begin_transaction().await?;
