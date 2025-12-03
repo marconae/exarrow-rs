@@ -14,7 +14,8 @@ The system SHALL define a complete mapping from Exasol data types to Apache Arro
 #### Scenario: Numeric types mapping
 
 - **WHEN** mapping Exasol numeric types
-- **THEN** DECIMAL SHALL map to Arrow Decimal128 or Decimal256
+- **THEN** DECIMAL(p, s) with p in range 1-36 SHALL map to Arrow Decimal128(p, s)
+- **AND** Exasol DECIMAL precision SHALL NOT exceed 36 (Exasol's documented maximum)
 - **AND** DOUBLE SHALL map to Arrow Float64
 - **AND** INTEGER SHALL map to Arrow Int64
 - **AND** SMALLINT SHALL map to Arrow Int32 or Int16
@@ -22,15 +23,16 @@ The system SHALL define a complete mapping from Exasol data types to Apache Arro
 #### Scenario: String types mapping
 
 - **WHEN** mapping Exasol string types
-- **THEN** VARCHAR SHALL map to Arrow Utf8
-- **AND** CHAR SHALL map to Arrow Utf8 with padding handling
+- **THEN** VARCHAR(n) SHALL map to Arrow Utf8
+- **AND** CHAR(n) SHALL map to Arrow Utf8 with padding handling
 - **AND** CLOB SHALL map to Arrow LargeUtf8
 
 #### Scenario: Date and time types mapping
 
 - **WHEN** mapping Exasol temporal types
 - **THEN** DATE SHALL map to Arrow Date32
-- **AND** TIMESTAMP SHALL map to Arrow Timestamp with appropriate timezone handling
+- **AND** TIMESTAMP with fractional precision 0-9 SHALL map to Arrow Timestamp with appropriate TimeUnit
+- **AND** TIMESTAMP precision 0-3 SHOULD map to Millisecond, 4-6 to Microsecond, 7-9 to Nanosecond
 - **AND** INTERVAL types SHALL map to Arrow Duration or Interval types
 
 #### Scenario: Boolean type mapping
@@ -80,8 +82,9 @@ The system SHALL preserve precision and scale information for numeric types.
 #### Scenario: DECIMAL precision mapping
 
 - **WHEN** mapping Exasol DECIMAL(p, s) type
-- **THEN** Arrow Decimal SHALL preserve precision and scale values
-- **AND** it SHALL validate values fit within Arrow's Decimal128/256 limits
+- **THEN** Arrow Decimal128 SHALL preserve precision p (1-36) and scale s
+- **AND** it SHALL always use Decimal128 since Exasol precision never exceeds 36
+- **AND** Decimal256 SHALL NOT be used for Exasol-originated types
 
 #### Scenario: Overflow detection
 
@@ -152,3 +155,30 @@ The system SHALL preserve type metadata in Arrow schemas.
 - **THEN** it SHALL provide access to original Exasol type names
 - **AND** it SHALL expose type mapping used for each column
 
+### Requirement: Exasol Type Limit Documentation
+
+The system SHALL document Exasol's actual data type limits as defined in official documentation.
+
+#### Scenario: DECIMAL limits
+
+- **WHEN** documenting DECIMAL type limits
+- **THEN** documentation SHALL state precision range is 1-36 digits
+- **AND** documentation SHALL note this differs from Arrow Decimal128's 38-digit limit
+
+#### Scenario: TIMESTAMP limits
+
+- **WHEN** documenting TIMESTAMP type limits
+- **THEN** documentation SHALL state fractional seconds precision range is 0-9
+- **AND** documentation SHALL explain the mapping to Arrow TimeUnit
+
+#### Scenario: String type limits
+
+- **WHEN** documenting string type limits
+- **THEN** documentation SHALL note VARCHAR maximum practical size
+- **AND** documentation SHALL note CHAR fixed-size semantics
+
+#### Scenario: INTERVAL limits
+
+- **WHEN** documenting INTERVAL type limits
+- **THEN** documentation SHALL state INTERVAL DAY TO SECOND precision range is 0-9 for fractional seconds
+- **AND** documentation SHALL note fixed 8-byte storage for both interval types
