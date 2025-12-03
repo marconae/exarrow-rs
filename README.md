@@ -120,17 +120,17 @@ exasol://myuser:mypass@exasol.example.com:8563/production?connection_timeout=60&
 
 ## Type Mapping
 
-| Exasol Type              | Arrow Type |
-|--------------------------|------------|
-| `BOOLEAN`                | `Boolean` |
-| `CHAR`, `VARCHAR`        | `Utf8` |
-| `DECIMAL(p≤36, s)`       | `Decimal128` |
-| `DOUBLE`                 | `Float64` |
-| `DATE`                   | `Date32` |
-| `TIMESTAMP`              | `Timestamp(Microsecond)` |
-| `INTERVAL YEAR TO MONTH` | `Interval(MonthDayNano)` |
-| `INTERVAL DAY TO SECOND` | `Interval(MonthDayNano)` |
-| `GEOMETRY`               | `Binary` |
+| Exasol Type              | Arrow Type                 | Notes                              |
+|--------------------------|----------------------------|------------------------------------|
+| `BOOLEAN`                | `Boolean`                  |                                    |
+| `CHAR`, `VARCHAR`        | `Utf8`                     |                                    |
+| `DECIMAL(p, s)`          | `Decimal128(p, s)`         | Precision 1-36                     |
+| `DOUBLE`                 | `Float64`                  |                                    |
+| `DATE`                   | `Date32`                   |                                    |
+| `TIMESTAMP`              | `Timestamp(Microsecond)`   | Exasol: 0-9 fractional digits      |
+| `INTERVAL YEAR TO MONTH` | `Interval(MonthDayNano)`   |                                    |
+| `INTERVAL DAY TO SECOND` | `Interval(MonthDayNano)`   | 0-9 fractional seconds             |
+| `GEOMETRY`               | `Binary`                   | WKB format                         |
 
 ## Examples
 

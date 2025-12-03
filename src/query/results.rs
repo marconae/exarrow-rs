@@ -416,6 +416,10 @@ impl ResultSet {
                     for value in column_values {
                         if value.is_null() {
                             builder.append_null();
+                        } else if let Some(s) = value.as_str() {
+                            // Parse string decimal (most common format from Exasol)
+                            let scaled = Self::parse_string_to_decimal(s, *scale)?;
+                            builder.append_value(scaled);
                         } else if let Some(i) = value.as_i64() {
                             // Scale the integer value
                             let scaled = i * 10i64.pow(*scale as u32);
@@ -423,6 +427,40 @@ impl ResultSet {
                         } else if let Some(f) = value.as_f64() {
                             let scaled = (f * 10f64.powi(*scale as i32)) as i128;
                             builder.append_value(scaled);
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                DataType::Date32 => {
+                    let mut builder = Date32Builder::new();
+                    for value in column_values {
+                        if value.is_null() {
+                            builder.append_null();
+                        } else if let Some(s) = value.as_str() {
+                            // Parse date string "YYYY-MM-DD" to days since Unix epoch
+                            match Self::parse_date_to_days(s) {
+                                Ok(days) => builder.append_value(days),
+                                Err(_) => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                DataType::Timestamp(_, _) => {
+                    let mut builder = TimestampMicrosecondBuilder::new();
+                    for value in column_values {
+                        if value.is_null() {
+                            builder.append_null();
+                        } else if let Some(s) = value.as_str() {
+                            // Parse timestamp string to microseconds since Unix epoch
+                            match Self::parse_timestamp_to_micros(s) {
+                                Ok(micros) => builder.append_value(micros),
+                                Err(_) => builder.append_null(),
+                            }
                         } else {
                             builder.append_null();
                         }
@@ -448,6 +486,153 @@ impl ResultSet {
 
         RecordBatch::try_new(Arc::clone(schema), arrays)
             .map_err(|e| ConversionError::ArrowError(e.to_string()))
+    }
+
+    /// Parse a date string "YYYY-MM-DD" to days since Unix epoch (1970-01-01).
+    fn parse_date_to_days(date_str: &str) -> Result<i32, ()> {
+        let parts: Vec<&str> = date_str.split('-').collect();
+        if parts.len() != 3 {
+            return Err(());
+        }
+
+        let year: i32 = parts[0].parse().map_err(|_| ())?;
+        let month: u32 = parts[1].parse().map_err(|_| ())?;
+        let day: u32 = parts[2].parse().map_err(|_| ())?;
+
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return Err(());
+        }
+
+        // Calculate days since Unix epoch
+        let days_from_year =
+            (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
+        let days_from_month = match month {
+            1 => 0,
+            2 => 31,
+            3 => 59,
+            4 => 90,
+            5 => 120,
+            6 => 151,
+            7 => 181,
+            8 => 212,
+            9 => 243,
+            10 => 273,
+            11 => 304,
+            12 => 334,
+            _ => return Err(()),
+        };
+
+        // Add leap day if after February and leap year
+        let is_leap_year = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let leap_adjustment = if month > 2 && is_leap_year { 1 } else { 0 };
+
+        Ok(days_from_year + days_from_month + day as i32 - 1 + leap_adjustment)
+    }
+
+    /// Parse a timestamp string to microseconds since Unix epoch.
+    fn parse_timestamp_to_micros(timestamp_str: &str) -> Result<i64, ()> {
+        // Split date and time
+        let parts: Vec<&str> = timestamp_str.split(' ').collect();
+        if parts.is_empty() {
+            return Err(());
+        }
+
+        // Parse date part
+        let days = Self::parse_date_to_days(parts[0])?;
+        let mut micros = days as i64 * 86400 * 1_000_000;
+
+        // Parse time part if present
+        if parts.len() > 1 {
+            let time_parts: Vec<&str> = parts[1].split(':').collect();
+            if time_parts.len() >= 2 {
+                let hours: i64 = time_parts[0].parse().map_err(|_| ())?;
+                let minutes: i64 = time_parts[1].parse().map_err(|_| ())?;
+
+                micros += hours * 3600 * 1_000_000;
+                micros += minutes * 60 * 1_000_000;
+
+                if time_parts.len() >= 3 {
+                    // Parse seconds and microseconds
+                    let sec_parts: Vec<&str> = time_parts[2].split('.').collect();
+                    let seconds: i64 = sec_parts[0].parse().map_err(|_| ())?;
+
+                    micros += seconds * 1_000_000;
+
+                    if sec_parts.len() > 1 {
+                        // Parse fractional seconds (microseconds)
+                        let frac = sec_parts[1];
+                        let frac_micros = if frac.len() <= 6 {
+                            let padding = 6 - frac.len();
+                            let padded = format!("{}{}", frac, "0".repeat(padding));
+                            padded.parse::<i64>().unwrap_or(0)
+                        } else {
+                            frac[..6].parse::<i64>().unwrap_or(0)
+                        };
+                        micros += frac_micros;
+                    }
+                }
+            }
+        }
+
+        Ok(micros)
+    }
+
+    /// Parse a decimal string to i128 scaled value.
+    ///
+    /// Handles formats like "123", "123.45", "-123.45"
+    fn parse_string_to_decimal(s: &str, scale: i8) -> Result<i128, ConversionError> {
+        // Handle empty string
+        if s.is_empty() {
+            return Err(ConversionError::InvalidFormat(
+                "Empty decimal string".to_string(),
+            ));
+        }
+
+        // Split on decimal point
+        let parts: Vec<&str> = s.split('.').collect();
+
+        let (integer_part, decimal_part) = match parts.len() {
+            1 => (parts[0], ""),
+            2 => (parts[0], parts[1]),
+            _ => {
+                return Err(ConversionError::InvalidFormat(format!(
+                    "Invalid decimal format: {}",
+                    s
+                )));
+            }
+        };
+
+        // Parse the integer part
+        let mut result: i128 = integer_part.parse().map_err(|_| {
+            ConversionError::InvalidFormat(format!("Invalid integer part: {}", integer_part))
+        })?;
+
+        // Scale up by 10^scale
+        result = result
+            .checked_mul(10_i128.pow(scale as u32))
+            .ok_or_else(|| ConversionError::InvalidFormat("Decimal overflow".to_string()))?;
+
+        // Add the decimal part
+        if !decimal_part.is_empty() {
+            let decimal_digits = decimal_part.len().min(scale as usize);
+            let decimal_value: i128 = decimal_part[..decimal_digits].parse().map_err(|_| {
+                ConversionError::InvalidFormat(format!("Invalid decimal part: {}", decimal_part))
+            })?;
+
+            // Scale the decimal part appropriately
+            let scale_diff = scale as usize - decimal_digits;
+            let scaled_decimal = decimal_value * 10_i128.pow(scale_diff as u32);
+
+            result = result
+                .checked_add(if integer_part.starts_with('-') {
+                    -scaled_decimal
+                } else {
+                    scaled_decimal
+                })
+                .ok_or_else(|| ConversionError::InvalidFormat("Decimal overflow".to_string()))?;
+        }
+
+        Ok(result)
     }
 }
 

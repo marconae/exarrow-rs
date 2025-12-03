@@ -80,12 +80,11 @@ impl TypeMapper {
 
             ExasolType::Char { .. } | ExasolType::Varchar { .. } => Ok(DataType::Utf8),
 
+            // Exasol DECIMAL precision is limited to 1-36 digits (per Exasol documentation).
+            // Arrow Decimal128 supports up to 38 digits, so all Exasol decimals fit.
+            // See: https://docs.exasol.com/db/latest/sql_references/data_types/data_type_size.htm
             ExasolType::Decimal { precision, scale } => {
-                if *precision <= 38 {
-                    Ok(DataType::Decimal128(*precision, *scale))
-                } else {
-                    Ok(DataType::Decimal256(*precision, *scale))
-                }
+                Ok(DataType::Decimal128(*precision, *scale))
             }
 
             ExasolType::Double => Ok(DataType::Float64),
@@ -265,13 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn test_decimal256_mapping() {
-        let exasol_type = ExasolType::Decimal {
-            precision: 40,
-            scale: 5,
-        };
-        let arrow_type = TypeMapper::exasol_to_arrow(&exasol_type, true).unwrap();
-        assert_eq!(arrow_type, DataType::Decimal256(40, 5));
+    fn test_arrow_decimal256_to_exasol() {
+        // Test that Arrow Decimal256 types (from external sources) correctly convert to Exasol type.
+        // Note: Exasol itself only produces precision <= 36, but Arrow sources may use Decimal256.
+        let arrow_type = DataType::Decimal256(40, 5);
+        let exasol_type = TypeMapper::arrow_to_exasol(&arrow_type).unwrap();
+        assert_eq!(
+            exasol_type,
+            ExasolType::Decimal {
+                precision: 40,
+                scale: 5
+            }
+        );
     }
 
     #[test]
