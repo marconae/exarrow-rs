@@ -126,7 +126,7 @@ jobs:
 
           echo "Waiting for Exasol to be ready..."
           for i in {1..60}; do
-            if docker logs exasol-test 2>&1 | grep -q "Stage5: Starting EXAoperation"; then
+            if docker logs exasol-test 2>&1 | grep -q "All stages finished."; then
               echo "Exasol is ready!"
               break
             fi
