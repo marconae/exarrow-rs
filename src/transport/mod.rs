@@ -39,6 +39,7 @@
 //! # }
 //! ```
 
+pub mod deserialize;
 pub mod messages;
 pub mod protocol;
 pub mod websocket;

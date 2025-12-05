@@ -16,7 +16,7 @@
 //! let database = driver.open("exasol://sys:exasol@localhost:8563")?;
 //!
 //! // Connect to the database
-//! let connection = database.connect().await?;
+//! let mut connection = database.connect().await?;
 //!
 //! // Execute a query
 //! let results = connection

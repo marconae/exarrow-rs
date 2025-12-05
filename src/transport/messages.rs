@@ -309,6 +309,9 @@ pub struct ResultSetInfo {
 }
 
 /// Result set data (nested inside ResultSetInfo for SELECT queries).
+///
+/// **Note**: Data is deserialized from Exasol's column-major format to row-major format.
+/// Access data as `data[row_idx][col_idx]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultSetData {
@@ -322,7 +325,9 @@ pub struct ResultSetData {
     pub num_rows_in_message: Option<i64>,
     /// Column information
     pub columns: Option<Vec<ColumnInfo>>,
-    /// Data rows (if included in response)
+    /// Data in row-major format: data[row_idx][col_idx]
+    /// Deserialized and transposed from Exasol's column-major wire format.
+    #[serde(default, deserialize_with = "super::deserialize::to_row_major_option")]
     pub data: Option<Vec<Vec<serde_json::Value>>>,
 }
 
@@ -480,12 +485,17 @@ pub struct FetchResponse {
 }
 
 /// Fetch response data.
+///
+/// **Note**: Data is deserialized from Exasol's column-major format to row-major format.
+/// Access data as `data[row_idx][col_idx]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchResponseData {
     /// Number of rows in this message
     pub num_rows: i64,
-    /// Data rows
+    /// Data in row-major format: data[row_idx][col_idx]
+    /// Deserialized and transposed from Exasol's column-major wire format.
+    #[serde(deserialize_with = "super::deserialize::to_row_major")]
     pub data: Vec<Vec<serde_json::Value>>,
 }
 
@@ -819,29 +829,27 @@ impl From<i32> for ResultSetHandle {
     }
 }
 
-/// Result data containing column-major data and metadata.
+/// Result data containing row-major data and metadata.
 ///
-/// **IMPORTANT**: Exasol WebSocket API returns data in **column-major format**.
-/// Each inner array in `data` contains all values for a single column, not a row.
+/// **Note**: While Exasol WebSocket API returns data in column-major format,
+/// this struct stores data in **row-major format** after streaming deserialization.
+/// Access data as `data[row_idx][col_idx]`.
 ///
 /// # Example
 ///
 /// For a query `SELECT id, name FROM users` returning 3 rows:
-/// ```json
-/// {
-///   "data": [
-///     [1, 2, 3],           // Column 0 (id): values for all rows
-///     ["Alice", "Bob", "Carol"]  // Column 1 (name): values for all rows
-///   ],
-///   "total_rows": 3
-/// }
+/// ```rust,ignore
+/// // data[row_idx][col_idx]
+/// data[0] = [1, "Alice"]     // Row 0
+/// data[1] = [2, "Bob"]       // Row 1
+/// data[2] = [3, "Carol"]     // Row 2
 /// ```
 #[derive(Debug, Clone)]
 pub struct ResultData {
     /// Column metadata
     pub columns: Vec<ColumnInfo>,
-    /// Data in column-major format: data[col_idx][row_idx]
-    /// Each inner Vec contains all values for one column.
+    /// Data in row-major format: data[row_idx][col_idx]
+    /// Each inner Vec contains all column values for one row.
     pub data: Vec<Vec<serde_json::Value>>,
     /// Total number of rows
     pub total_rows: i64,

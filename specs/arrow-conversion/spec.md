@@ -9,19 +9,19 @@ efficient and accurate data transformation for all supported data types.
 
 ### Requirement: JSON to Arrow Conversion
 
-The system SHALL convert Exasol WebSocket API JSON responses to Apache Arrow RecordBatch format.
+The system SHALL convert Exasol WebSocket API JSON responses to Apache Arrow RecordBatch format using row-major input data.
 
 #### Scenario: Column data conversion
 
 - **WHEN** converting JSON result data to Arrow
-- **THEN** it SHALL parse JSON arrays representing columns
+- **THEN** it SHALL receive data in row-major format (`data[row_idx][col_idx]`)
 - **AND** it SHALL apply correct type conversions based on schema
 - **AND** it SHALL build Arrow arrays for each column
 
 #### Scenario: Row-oriented to columnar conversion
 
-- **WHEN** JSON data is in row-oriented format
-- **THEN** it SHALL transpose data to columnar format for Arrow
+- **WHEN** JSON data arrives in row-major format from the deserializer
+- **THEN** it SHALL iterate rows and distribute values to column builders
 - **AND** it SHALL maintain data ordering and alignment
 
 #### Scenario: Column-oriented conversion
@@ -210,23 +210,34 @@ The system SHALL provide detailed error information when conversion fails.
 - **THEN** it SHALL have configurable behavior (fail-fast or collect errors)
 - **AND** it SHALL provide all error details for debugging
 
-### Requirement: Optimized Row-to-Column Transposition
+### Requirement: Streaming Column-to-Row Deserialization
 
-The system SHALL efficiently transpose row-oriented data to columnar format with minimal memory overhead.
+The system SHALL transpose column-major JSON data to row-major format during deserialization using custom serde deserializers.
 
-#### Scenario: Move semantics transposition
+#### Scenario: Custom deserializer application
 
-- **WHEN** transposing rows to columns
-- **THEN** it SHALL use move semantics instead of cloning where possible
-- **AND** it SHALL pre-allocate vectors with exact capacity based on row count
-- **AND** it SHALL minimize intermediate memory allocations
+- **WHEN** deserializing `FetchResponseData` or `ResultSetData` from JSON
+- **THEN** the `data` field SHALL use a custom deserializer that transposes during parsing
+- **AND** the resulting `Vec<Vec<Value>>` SHALL be in row-major format: `data[row_idx][col_idx]`
 
-#### Scenario: Capacity pre-allocation
+#### Scenario: Transposition during deserialization
 
-- **WHEN** building Arrow arrays from result data
-- **THEN** it SHALL pass total_rows to builder constructors when known
-- **AND** it SHALL use `Vec::with_capacity` for intermediate collections
-- **AND** it SHALL avoid repeated reallocations during construction
+- **WHEN** Exasol returns column-major JSON data (columns as outer array)
+- **THEN** the custom deserializer SHALL iterate columns and distribute values to rows
+- **AND** it SHALL use `DeserializeSeed` pattern to accumulate across columns
+- **AND** no post-hoc transposition step SHALL be required
+
+#### Scenario: Empty result handling
+
+- **WHEN** deserializing an empty result set
+- **THEN** it SHALL return an empty `Vec<Vec<Value>>`
+- **AND** it SHALL handle zero columns gracefully
+
+#### Scenario: Single column handling
+
+- **WHEN** deserializing a result with one column
+- **THEN** each row SHALL contain exactly one value
+- **AND** the format SHALL be consistent with multi-column results
 
 ### Requirement: Non-Null Column Fast Path
 

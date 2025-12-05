@@ -954,7 +954,7 @@ impl adbc_core::Statement for FfiStatement {
 
         let result = get_runtime().block_on(async {
             let params: crate::connection::ConnectionParams = uri.parse()?;
-            let conn = ExaConnection::from_params(params).await?;
+            let mut conn = ExaConnection::from_params(params).await?;
             let batches = conn.query(&sql).await?;
             conn.close().await?;
             Ok::<_, ExasolError>(batches)
@@ -983,7 +983,7 @@ impl adbc_core::Statement for FfiStatement {
 
         let result = get_runtime().block_on(async {
             let params: crate::connection::ConnectionParams = uri.parse()?;
-            let conn = ExaConnection::from_params(params).await?;
+            let mut conn = ExaConnection::from_params(params).await?;
             let count = conn.execute_update(&sql).await?;
             conn.close().await?;
             Ok::<_, ExasolError>(count)

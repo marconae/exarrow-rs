@@ -813,4 +813,136 @@ A74EI7MHQ7163wVPT0VWFRvUmmv+UO7W8wIDAQAB
             panic!("Expected ProtocolError");
         }
     }
+
+    #[test]
+    fn test_check_status_error_with_none_exception() {
+        let transport = WebSocketTransport::new();
+
+        let result = transport.check_status("error", &None);
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert_eq!(msg, "Unknown error");
+        } else {
+            panic!("Expected ProtocolError with 'Unknown error' message");
+        }
+    }
+
+    #[test]
+    fn test_check_status_error_with_exception_missing_sql_code() {
+        use super::super::messages::ExceptionInfo;
+
+        let transport = WebSocketTransport::new();
+        let exception = Some(ExceptionInfo {
+            sql_code: None,
+            text: "Some database error".to_string(),
+        });
+
+        let result = transport.check_status("error", &exception);
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Some database error"));
+            assert!(msg.contains("unknown")); // sql_code defaults to "unknown"
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_results_requires_authenticated_state() {
+        let mut transport = WebSocketTransport::new();
+        let handle = super::super::messages::ResultSetHandle::new(1);
+
+        let result = transport.fetch_results(handle).await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before fetching results"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_results_requires_authenticated_state_from_connected() {
+        let mut transport = WebSocketTransport::new();
+        transport.state = ConnectionState::Connected;
+        let handle = super::super::messages::ResultSetHandle::new(1);
+
+        let result = transport.fetch_results(handle).await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before fetching results"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_close_result_set_requires_authenticated_state() {
+        let mut transport = WebSocketTransport::new();
+        let handle = super::super::messages::ResultSetHandle::new(1);
+
+        let result = transport.close_result_set(handle).await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before closing result sets"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_close_result_set_requires_authenticated_state_from_connected() {
+        let mut transport = WebSocketTransport::new();
+        transport.state = ConnectionState::Connected;
+        let handle = super::super::messages::ResultSetHandle::new(1);
+
+        let result = transport.close_result_set(handle).await;
+
+        assert!(result.is_err());
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(msg.contains("Must authenticate before closing result sets"));
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_close_from_connected_state_succeeds() {
+        let mut transport = WebSocketTransport::new();
+        transport.state = ConnectionState::Connected;
+
+        // Close when connected (but not authenticated) should succeed
+        // and should NOT try to send disconnect request
+        let result = transport.close().await;
+
+        assert!(result.is_ok());
+        assert_eq!(transport.state, ConnectionState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_session_info() {
+        use super::super::messages::SessionInfo;
+
+        let mut transport = WebSocketTransport::new();
+        transport.state = ConnectionState::Connected;
+        transport.session_info = Some(SessionInfo {
+            session_id: "12345".to_string(),
+            protocol_version: 3,
+            release_version: "7.1.0".to_string(),
+            database_name: "test_db".to_string(),
+            product_name: "EXASolution".to_string(),
+            max_data_message_size: 1024 * 1024,
+            time_zone: Some("UTC".to_string()),
+        });
+
+        let result = transport.close().await;
+
+        assert!(result.is_ok());
+        assert!(transport.session_info.is_none());
+    }
 }

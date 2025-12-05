@@ -47,24 +47,24 @@ The system SHALL provide an ADBC-compliant database connection interface.
 
 ### Requirement: Statement Execution Interface
 
-The system SHALL provide an ADBC-compliant statement interface for query execution.
+The system SHALL provide an ADBC-compliant statement interface for query execution through Connection-mediated transport.
 
 #### Scenario: Query preparation
 
-- **WHEN** a SQL query is prepared
-- **THEN** it SHALL validate SQL syntax locally where possible
-- **AND** it SHALL return a statement handle
+- **WHEN** a SQL query is prepared via `Connection::create_statement()`
+- **THEN** it SHALL return a Statement containing SQL text and parameters
+- **AND** the Statement SHALL NOT hold transport references
 
 #### Scenario: Query execution
 
-- **WHEN** a prepared statement is executed
+- **WHEN** a Statement is executed via `Connection::execute_statement()`
 - **THEN** it SHALL send the query via WebSocket protocol
 - **AND** it SHALL return results as Arrow RecordBatch
 - **AND** it SHALL include result metadata (schema, row count)
 
 #### Scenario: Parameterized queries
 
-- **WHEN** a statement is executed with parameters
+- **WHEN** a Statement with parameters is executed via `Connection::execute_statement()`
 - **THEN** it SHALL bind parameters safely to prevent SQL injection
 - **AND** it SHALL support Exasol's parameter binding syntax
 

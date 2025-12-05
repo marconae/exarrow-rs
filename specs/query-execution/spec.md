@@ -9,49 +9,49 @@ transaction support, and query lifecycle management.
 
 ### Requirement: SQL Query Execution
 
-The system SHALL execute SQL queries against Exasol database via WebSocket protocol.
+The system SHALL execute SQL queries against Exasol database via WebSocket protocol through Connection-owned transport.
 
 #### Scenario: Simple SELECT query
 
-- **WHEN** executing a simple SELECT statement
+- **WHEN** executing a simple SELECT statement via `Connection::execute_statement()`
 - **THEN** it SHALL send the query to Exasol via WebSocket
 - **AND** it SHALL retrieve the complete result set
 - **AND** it SHALL return results as Arrow RecordBatch
 
 #### Scenario: DDL statement execution
 
-- **WHEN** executing DDL statements (CREATE, ALTER, DROP)
+- **WHEN** executing DDL statements (CREATE, ALTER, DROP) via `Connection::execute_statement()`
 - **THEN** it SHALL execute the statement
 - **AND** it SHALL return success or error status
 - **AND** it SHALL return affected object information
 
 #### Scenario: DML statement execution
 
-- **WHEN** executing DML statements (INSERT, UPDATE, DELETE)
+- **WHEN** executing DML statements (INSERT, UPDATE, DELETE) via `Connection::execute_statement_update()`
 - **THEN** it SHALL execute the statement
 - **AND** it SHALL return the number of affected rows
 
 ### Requirement: Prepared Statements
 
-The system SHALL support prepared statement execution with parameter binding.
+The system SHALL support prepared statement execution with parameter binding via Connection methods.
 
 #### Scenario: Statement preparation
 
-- **WHEN** preparing a SQL statement with parameters
+- **WHEN** preparing a SQL statement via `Connection::prepare()`
 - **THEN** it SHALL validate the SQL syntax
 - **AND** it SHALL identify parameter placeholders
-- **AND** it SHALL return a prepared statement handle
+- **AND** it SHALL return a PreparedStatement handle
 
 #### Scenario: Parameter binding
 
-- **WHEN** binding parameters to a prepared statement
+- **WHEN** binding parameters to a PreparedStatement
 - **THEN** it SHALL validate parameter types against expected types
 - **AND** it SHALL convert Rust types to Exasol-compatible values
 - **AND** it SHALL prevent SQL injection through proper escaping
 
 #### Scenario: Prepared statement execution
 
-- **WHEN** executing a prepared statement with bound parameters
+- **WHEN** executing a PreparedStatement via `Connection::execute_prepared()`
 - **THEN** it SHALL substitute parameters safely
 - **AND** it SHALL execute the query
 - **AND** it SHALL return results in Arrow format

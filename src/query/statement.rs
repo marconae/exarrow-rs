@@ -1,15 +1,9 @@
 //! SQL statement handling and execution.
 //!
-//! This module provides the `Statement` type for executing SQL queries with
-//! parameter binding and transaction support.
+//! This module provides the `Statement` type as a pure data container for SQL queries
+//! with parameter binding. Statement execution is handled by Connection.
 
 use crate::error::QueryError;
-use crate::query::results::ResultSet;
-use crate::transport::TransportProtocol;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
-use tokio::time::timeout;
 
 /// Type of SQL statement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,12 +183,29 @@ impl From<Vec<u8>> for Parameter {
     }
 }
 
-/// SQL statement for query execution.
+/// SQL statement as a pure data container.
 ///
-/// Supports parameter binding, timeout control, and transaction management.
+/// Statement holds SQL text, parameters, timeout, and statement type.
+/// Execution is performed by Connection, not by Statement itself.
+///
+/// # Example
+///
+/// ```no_run
+/// use exarrow_rs::adbc::Connection;
+///
+/// # async fn example(connection: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
+/// // Create a statement
+/// let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ?");
+///
+/// // Bind parameters
+/// stmt.bind(0, 18)?;
+///
+/// // Execute via Connection
+/// let results = connection.execute_statement(&stmt).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct Statement {
-    /// Reference to the transport layer
-    transport: Arc<Mutex<dyn TransportProtocol>>,
     /// SQL text (may contain parameter placeholders)
     sql: String,
     /// Bound parameters (indexed by position)
@@ -203,22 +214,19 @@ pub struct Statement {
     timeout_ms: u64,
     /// Statement type
     statement_type: StatementType,
-    /// Whether the statement has been executed
-    executed: bool,
 }
 
 impl Statement {
     /// Create a new statement.
-    pub fn new(transport: Arc<Mutex<dyn TransportProtocol>>, sql: String) -> Self {
+    pub fn new(sql: impl Into<String>) -> Self {
+        let sql = sql.into();
         let statement_type = StatementType::from_sql(&sql);
 
         Self {
-            transport,
             sql,
             parameters: Vec::new(),
             timeout_ms: 120_000, // 2 minutes default
             statement_type,
-            executed: false,
         }
     }
 
@@ -230,6 +238,11 @@ impl Statement {
     /// Get the statement type.
     pub fn statement_type(&self) -> StatementType {
         self.statement_type
+    }
+
+    /// Get the timeout in milliseconds.
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
     }
 
     /// Set query timeout.
@@ -268,8 +281,15 @@ impl Statement {
         self.parameters.clear();
     }
 
+    /// Get bound parameters.
+    pub fn parameters(&self) -> &[Option<Parameter>] {
+        &self.parameters
+    }
+
     /// Build the final SQL with parameters substituted.
-    fn build_sql(&self) -> Result<String, QueryError> {
+    ///
+    /// This is used internally by Connection when executing statements.
+    pub fn build_sql(&self) -> Result<String, QueryError> {
         let mut sql = self.sql.clone();
         let mut param_index = 0;
 
@@ -296,104 +316,21 @@ impl Statement {
 
         Ok(sql)
     }
+}
 
-    /// Execute the statement.
-    ///
-    /// Returns a `ResultSet` for SELECT queries or row count for DML statements.
-    ///
-    /// # Errors
-    /// Returns `QueryError` if execution fails or times out.
-    pub async fn execute(&mut self) -> Result<ResultSet, QueryError> {
-        if self.executed {
-            return Err(QueryError::InvalidState(
-                "Statement already executed".to_string(),
-            ));
-        }
-
-        // Build final SQL with parameters
-        let final_sql = self.build_sql()?;
-
-        // Execute with timeout
-        let timeout_duration = Duration::from_millis(self.timeout_ms);
-        let transport = Arc::clone(&self.transport);
-
-        let result = timeout(timeout_duration, async move {
-            let mut transport_guard = transport.lock().await;
-            transport_guard.execute_query(&final_sql).await
-        })
-        .await
-        .map_err(|_| QueryError::Timeout {
-            timeout_ms: self.timeout_ms,
-        })?
-        .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
-
-        self.executed = true;
-
-        // Convert transport result to ResultSet
-        ResultSet::from_transport_result(result, Arc::clone(&self.transport))
-    }
-
-    /// Execute and return the row count (for non-SELECT statements).
-    ///
-    /// # Errors
-    /// Returns `QueryError` if execution fails or if statement is a SELECT.
-    pub async fn execute_update(&mut self) -> Result<i64, QueryError> {
-        let result_set = self.execute().await?;
-
-        result_set.row_count().ok_or_else(|| {
-            QueryError::NoResultSet("Expected row count, got result set".to_string())
-        })
-    }
-
-    /// Reset the statement for re-execution.
-    ///
-    /// Clears the executed flag but preserves parameters.
-    pub fn reset(&mut self) {
-        self.executed = false;
+impl std::fmt::Debug for Statement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Statement")
+            .field("sql", &self.sql)
+            .field("statement_type", &self.statement_type)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
     }
 }
 
-/// Builder for creating `Statement` instances with a fluent API.
-pub struct StatementBuilder {
-    transport: Arc<Mutex<dyn TransportProtocol>>,
-    sql: Option<String>,
-    timeout_ms: u64,
-}
-
-impl StatementBuilder {
-    /// Create a new statement builder.
-    pub fn new(transport: Arc<Mutex<dyn TransportProtocol>>) -> Self {
-        Self {
-            transport,
-            sql: None,
-            timeout_ms: 120_000, // 2 minutes default
-        }
-    }
-
-    /// Set the SQL text.
-    pub fn sql(mut self, sql: impl Into<String>) -> Self {
-        self.sql = Some(sql.into());
-        self
-    }
-
-    /// Set the query timeout.
-    pub fn timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = timeout_ms;
-        self
-    }
-
-    /// Build the statement.
-    ///
-    /// # Panics
-    /// Panics if SQL text was not set.
-    pub fn build(self) -> Statement {
-        let sql = self
-            .sql
-            .expect("SQL text must be set before building statement");
-
-        let mut stmt = Statement::new(self.transport, sql);
-        stmt.set_timeout(self.timeout_ms);
-        stmt
+impl std::fmt::Display for Statement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Statement({})", self.sql)
     }
 }
 
@@ -401,31 +338,6 @@ impl StatementBuilder {
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::transport::messages::{ColumnInfo, DataType, ResultData, ResultSetHandle};
-    use crate::transport::protocol::{
-        PreparedStatementHandle, QueryResult as TransportQueryResult,
-    };
-    use async_trait::async_trait;
-    use mockall::mock;
-
-    // Mock transport for testing
-    mock! {
-        pub Transport {}
-
-        #[async_trait]
-        impl TransportProtocol for Transport {
-            async fn connect(&mut self, params: &crate::transport::protocol::ConnectionParams) -> Result<(), crate::error::TransportError>;
-            async fn authenticate(&mut self, credentials: &crate::transport::protocol::Credentials) -> Result<crate::transport::messages::SessionInfo, crate::error::TransportError>;
-            async fn execute_query(&mut self, sql: &str) -> Result<TransportQueryResult, crate::error::TransportError>;
-            async fn fetch_results(&mut self, handle: ResultSetHandle) -> Result<ResultData, crate::error::TransportError>;
-            async fn close_result_set(&mut self, handle: ResultSetHandle) -> Result<(), crate::error::TransportError>;
-            async fn create_prepared_statement(&mut self, sql: &str) -> Result<PreparedStatementHandle, crate::error::TransportError>;
-            async fn execute_prepared_statement(&mut self, handle: &PreparedStatementHandle, parameters: Option<Vec<Vec<serde_json::Value>>>) -> Result<TransportQueryResult, crate::error::TransportError>;
-            async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
-            async fn close(&mut self) -> Result<(), crate::error::TransportError>;
-            fn is_connected(&self) -> bool;
-        }
-    }
 
     #[test]
     fn test_statement_type_detection() {
@@ -524,25 +436,18 @@ mod tests {
         let _p: Parameter = vec![1u8, 2, 3].into();
     }
 
-    #[tokio::test]
-    async fn test_statement_creation() {
-        let mut mock_transport = MockTransport::new();
-        mock_transport.expect_is_connected().returning(|| true);
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let stmt = Statement::new(transport, "SELECT * FROM users".to_string());
+    #[test]
+    fn test_statement_creation() {
+        let stmt = Statement::new("SELECT * FROM users");
 
         assert_eq!(stmt.sql(), "SELECT * FROM users");
         assert_eq!(stmt.statement_type(), StatementType::Select);
+        assert_eq!(stmt.timeout_ms(), 120_000);
     }
 
-    #[tokio::test]
-    async fn test_statement_parameter_binding() {
-        let mut mock_transport = MockTransport::new();
-        mock_transport.expect_is_connected().returning(|| true);
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(transport, "SELECT * FROM users WHERE id = ?".to_string());
+    #[test]
+    fn test_statement_parameter_binding() {
+        let mut stmt = Statement::new("SELECT * FROM users WHERE id = ?");
 
         stmt.bind(0, 42).unwrap();
 
@@ -550,16 +455,9 @@ mod tests {
         assert_eq!(final_sql, "SELECT * FROM users WHERE id = 42");
     }
 
-    #[tokio::test]
-    async fn test_statement_multiple_parameters() {
-        let mut mock_transport = MockTransport::new();
-        mock_transport.expect_is_connected().returning(|| true);
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(
-            transport,
-            "SELECT * FROM users WHERE age > ? AND name = ?".to_string(),
-        );
+    #[test]
+    fn test_statement_multiple_parameters() {
+        let mut stmt = Statement::new("SELECT * FROM users WHERE age > ? AND name = ?");
 
         stmt.bind(0, 18).unwrap();
         stmt.bind(1, "John").unwrap();
@@ -571,117 +469,25 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_statement_builder() {
-        let mut mock_transport = MockTransport::new();
-        mock_transport.expect_is_connected().returning(|| true);
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-
-        let stmt = StatementBuilder::new(transport)
-            .sql("SELECT * FROM users")
-            .timeout_ms(30_000)
-            .build();
-
-        assert_eq!(stmt.sql(), "SELECT * FROM users");
-        assert_eq!(stmt.timeout_ms, 30_000);
+    #[test]
+    fn test_statement_set_timeout() {
+        let mut stmt = Statement::new("SELECT * FROM users");
+        stmt.set_timeout(30_000);
+        assert_eq!(stmt.timeout_ms(), 30_000);
     }
 
-    #[tokio::test]
-    async fn test_statement_execute_row_count() {
-        let mut mock_transport = MockTransport::new();
-
-        // Expect execute_query to be called
-        mock_transport
-            .expect_execute_query()
-            .times(1)
-            .returning(|_sql| Ok(TransportQueryResult::RowCount { count: 5 }));
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(transport, "INSERT INTO users VALUES (1)".to_string());
-
-        let row_count = stmt.execute_update().await.unwrap();
-        assert_eq!(row_count, 5);
+    #[test]
+    fn test_statement_clear_parameters() {
+        let mut stmt = Statement::new("SELECT * FROM users WHERE id = ?");
+        stmt.bind(0, 42).unwrap();
+        stmt.clear_parameters();
+        assert!(stmt.parameters().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_statement_execute_result_set() {
-        let mut mock_transport = MockTransport::new();
-
-        // Expect execute_query to be called
-        mock_transport
-            .expect_execute_query()
-            .times(1)
-            .returning(|_sql| {
-                let data = ResultData {
-                    columns: vec![ColumnInfo {
-                        name: "id".to_string(),
-                        data_type: DataType {
-                            type_name: "DECIMAL".to_string(),
-                            precision: Some(18),
-                            scale: Some(0),
-                            size: None,
-                            character_set: None,
-                            with_local_time_zone: None,
-                            fraction: None,
-                        },
-                    }],
-                    data: vec![vec![serde_json::json!(1)]],
-                    total_rows: 1,
-                };
-
-                Ok(TransportQueryResult::ResultSet {
-                    handle: Some(ResultSetHandle::new(1)),
-                    data,
-                })
-            });
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(transport, "SELECT * FROM users".to_string());
-
-        let result_set = stmt.execute().await.unwrap();
-        assert!(result_set.row_count().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_statement_double_execution_error() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_execute_query()
-            .times(1)
-            .returning(|_sql| Ok(TransportQueryResult::RowCount { count: 1 }));
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(transport, "UPDATE users SET name = 'test'".to_string());
-
-        // First execution should succeed
-        let _ = stmt.execute().await.unwrap();
-
-        // Second execution should fail
-        let result = stmt.execute().await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), QueryError::InvalidState(_)));
-    }
-
-    #[tokio::test]
-    async fn test_statement_reset() {
-        let mut mock_transport = MockTransport::new();
-
-        mock_transport
-            .expect_execute_query()
-            .times(2)
-            .returning(|_sql| Ok(TransportQueryResult::RowCount { count: 1 }));
-
-        let transport: Arc<Mutex<dyn TransportProtocol>> = Arc::new(Mutex::new(mock_transport));
-        let mut stmt = Statement::new(transport, "UPDATE users SET name = 'test'".to_string());
-
-        // First execution
-        let _ = stmt.execute().await.unwrap();
-
-        // Reset and execute again
-        stmt.reset();
-        let result = stmt.execute().await;
-        assert!(result.is_ok());
+    #[test]
+    fn test_statement_display() {
+        let stmt = Statement::new("SELECT 1");
+        let display = format!("{}", stmt);
+        assert!(display.contains("SELECT 1"));
     }
 }

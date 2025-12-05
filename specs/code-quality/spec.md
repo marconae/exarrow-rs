@@ -39,3 +39,26 @@ ALL code changes MUST pass the complete test suite before being considered compl
 - **THEN** integration tests against Exasol database MUST pass
 - **AND** driver functionality SHALL remain intact
 
+### Requirement: Transport Ownership Pattern
+
+The codebase SHALL follow Rust ownership conventions for transport management, avoiding shared mutable state via interior mutability.
+
+#### Scenario: Connection owns transport exclusively
+
+- **WHEN** a Connection is created
+- **THEN** it SHALL own the transport layer directly (not via `Arc<Mutex<>>`)
+- **AND** statement execution SHALL go through Connection methods
+
+#### Scenario: Statement as pure data
+
+- **WHEN** a Statement is created
+- **THEN** it SHALL contain only SQL text, parameters, and configuration
+- **AND** it SHALL NOT hold references to transport or session
+- **AND** it SHALL NOT have methods that perform I/O operations
+
+#### Scenario: Inversion of control for execution
+
+- **WHEN** executing a statement
+- **THEN** the caller SHALL pass the Statement to `Connection::execute_statement()`
+- **AND** the Connection SHALL perform the actual transport operation
+- **AND** no mutex contention SHALL occur between multiple statements

@@ -1,37 +1,33 @@
 //! Query execution and result handling.
 //!
 //! This module provides the core query execution functionality for exarrow-rs,
-//! including SQL statement preparation, parameter binding, and result set handling.
+//! including SQL statement data structures, prepared statements, and result handling.
+//!
+//! # v2.0.0 Changes
+//!
+//! Statement is now a pure data container. Execution is performed by Connection.
 //!
 //! # Overview
 //!
 //! The query module is organized into:
-//! - `statement` - SQL statement execution and parameter binding
+//! - `statement` - SQL statement data container with parameter binding
 //! - `prepared` - Prepared statement handling for parameterized queries
 //! - `results` - Result set iteration and metadata handling
 //!
 //! # Example
 //!
 //! ```no_run
-//! use exarrow_rs::query::{Statement, StatementBuilder};
-//! use exarrow_rs::transport::WebSocketTransport;
-//! use std::sync::Arc;
-//! use tokio::sync::Mutex;
+//! use exarrow_rs::adbc::Connection;
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let transport = Arc::new(Mutex::new(WebSocketTransport::new()));
-//!
-//! // Create and execute a statement
-//! let mut stmt = StatementBuilder::new(transport)
-//!     .sql("SELECT * FROM users WHERE age > ?")
-//!     .timeout_ms(30_000)
-//!     .build();
+//! # async fn example(connection: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
+//! // Create a statement (now synchronous)
+//! let mut stmt = connection.create_statement("SELECT * FROM users WHERE age > ?");
 //!
 //! // Bind parameters
 //! stmt.bind(0, 18)?;
 //!
-//! // Execute query
-//! let result_set = stmt.execute().await?;
+//! // Execute via Connection
+//! let result_set = connection.execute_statement(&stmt).await?;
 //!
 //! // Iterate over results
 //! for batch in result_set.into_iterator()? {
@@ -49,7 +45,7 @@ pub mod statement;
 // Re-export commonly used types
 pub use prepared::PreparedStatement;
 pub use results::{QueryMetadata, ResultSet, ResultSetIterator};
-pub use statement::{Parameter, Statement, StatementBuilder, StatementType};
+pub use statement::{Parameter, Statement, StatementType};
 
 #[cfg(test)]
 mod tests {
