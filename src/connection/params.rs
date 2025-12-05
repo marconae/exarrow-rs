@@ -750,4 +750,470 @@ mod tests {
         // Debug output should not contain the password
         assert!(!debug.contains("super_secret"));
     }
+
+    // ============================================================
+    // Builder validation tests
+    // ============================================================
+
+    #[test]
+    fn test_builder_validation_missing_username() {
+        let result = ConnectionBuilder::new().host("localhost").build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, .. } if parameter == "username"
+        ));
+    }
+
+    #[test]
+    fn test_builder_validation_empty_username() {
+        let result = ConnectionBuilder::new()
+            .host("localhost")
+            .username("")
+            .build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, message }
+                if parameter == "username" && message.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn test_builder_validation_port_zero() {
+        let result = ConnectionBuilder::new()
+            .host("localhost")
+            .username("test")
+            .port(0)
+            .build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, message }
+                if parameter == "port" && message.contains("greater than 0")
+        ));
+    }
+
+    #[test]
+    fn test_builder_default() {
+        let builder = ConnectionBuilder::default();
+        let result = builder.host("localhost").username("user").build().unwrap();
+        assert_eq!(result.host, "localhost");
+    }
+
+    #[test]
+    fn test_connection_params_builder_method() {
+        let builder = ConnectionParams::builder();
+        let params = builder.host("localhost").username("user").build().unwrap();
+        assert_eq!(params.host, "localhost");
+    }
+
+    #[test]
+    fn test_builder_idle_timeout() {
+        let params = ConnectionBuilder::new()
+            .host("localhost")
+            .username("test")
+            .idle_timeout(Duration::from_secs(120))
+            .build()
+            .unwrap();
+
+        assert_eq!(params.idle_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_builder_validate_server_certificate() {
+        let params = ConnectionBuilder::new()
+            .host("localhost")
+            .username("test")
+            .validate_server_certificate(false)
+            .build()
+            .unwrap();
+
+        assert!(!params.validate_server_certificate);
+    }
+
+    #[test]
+    fn test_builder_client_version() {
+        let params = ConnectionBuilder::new()
+            .host("localhost")
+            .username("test")
+            .client_version("1.2.3")
+            .build()
+            .unwrap();
+
+        assert_eq!(params.client_version, "1.2.3");
+    }
+
+    #[test]
+    fn test_builder_default_values() {
+        let params = ConnectionBuilder::new()
+            .host("localhost")
+            .username("test")
+            .build()
+            .unwrap();
+
+        assert_eq!(params.connection_timeout, Duration::from_secs(30));
+        assert_eq!(params.query_timeout, Duration::from_secs(300));
+        assert_eq!(params.idle_timeout, Duration::from_secs(600));
+        assert!(!params.use_tls);
+        assert!(params.validate_server_certificate);
+        assert_eq!(params.client_name, "exarrow-rs");
+    }
+
+    // ============================================================
+    // Query parameter parsing tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_query_param_without_equals() {
+        let result = ConnectionParams::from_str("exasol://user@localhost?invalid_param");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::ParseError(msg) if msg.contains("Invalid query parameter format")
+        ));
+    }
+
+    #[test]
+    fn test_parse_query_param_empty_pairs() {
+        // Empty pairs between && should be skipped
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?timeout=10&&tls=true").unwrap();
+
+        assert_eq!(params.connection_timeout, Duration::from_secs(10));
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_query_timeout() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?query_timeout=60").unwrap();
+
+        assert_eq!(params.query_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_parse_idle_timeout() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?idle_timeout=120").unwrap();
+
+        assert_eq!(params.idle_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_connection_timeout_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?connection_timeout=15").unwrap();
+
+        assert_eq!(params.connection_timeout, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn test_parse_invalid_timeout_value() {
+        let result = ConnectionParams::from_str("exasol://user@localhost?timeout=not_a_number");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, message }
+                if parameter == "timeout" && message.contains("Invalid timeout value")
+        ));
+    }
+
+    #[test]
+    fn test_parse_invalid_query_timeout_value() {
+        let result =
+            ConnectionParams::from_str("exasol://user@localhost?query_timeout=not_a_number");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, .. } if parameter == "query_timeout"
+        ));
+    }
+
+    #[test]
+    fn test_parse_invalid_idle_timeout_value() {
+        let result =
+            ConnectionParams::from_str("exasol://user@localhost?idle_timeout=not_a_number");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, .. } if parameter == "idle_timeout"
+        ));
+    }
+
+    // ============================================================
+    // TLS/SSL parameter tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_ssl_param() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?ssl=true").unwrap();
+
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_use_tls_param() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?use_tls=1").unwrap();
+
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_validate_certificate_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?validate_certificate=false")
+                .unwrap();
+
+        assert!(!params.validate_server_certificate);
+    }
+
+    #[test]
+    fn test_parse_verify_certificate_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?verify_certificate=0").unwrap();
+
+        assert!(!params.validate_server_certificate);
+    }
+
+    #[test]
+    fn test_parse_validateservercertificate_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?validateservercertificate=no")
+                .unwrap();
+
+        assert!(!params.validate_server_certificate);
+    }
+
+    // ============================================================
+    // Boolean parsing tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_bool_yes() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=yes").unwrap();
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_no() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=no").unwrap();
+        assert!(!params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_on() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=on").unwrap();
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_off() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=off").unwrap();
+        assert!(!params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_one() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=1").unwrap();
+        assert!(params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_zero() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=0").unwrap();
+        assert!(!params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_case_insensitive() {
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=TRUE").unwrap();
+        assert!(params.use_tls);
+
+        let params = ConnectionParams::from_str("exasol://user@localhost?tls=FALSE").unwrap();
+        assert!(!params.use_tls);
+    }
+
+    #[test]
+    fn test_parse_bool_invalid() {
+        let result = ConnectionParams::from_str("exasol://user@localhost?tls=maybe");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::InvalidParameter { parameter, message }
+                if parameter == "boolean" && message.contains("Invalid boolean value")
+        ));
+    }
+
+    // ============================================================
+    // Client info parameter tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_client_version_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?client_version=2.0.0").unwrap();
+
+        assert_eq!(params.client_version, "2.0.0");
+    }
+
+    #[test]
+    fn test_parse_custom_attribute_param() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?custom_key=custom_value").unwrap();
+
+        assert_eq!(
+            params.attributes.get("custom_key"),
+            Some(&"custom_value".to_string())
+        );
+    }
+
+    // ============================================================
+    // Authentication from query params tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_username_from_query_user() {
+        let params = ConnectionParams::from_str("exasol://localhost?user=testuser").unwrap();
+
+        assert_eq!(params.username, "testuser");
+    }
+
+    #[test]
+    fn test_parse_username_from_query_username() {
+        let params = ConnectionParams::from_str("exasol://localhost?username=testuser").unwrap();
+
+        assert_eq!(params.username, "testuser");
+    }
+
+    #[test]
+    fn test_parse_password_from_query_password() {
+        let params =
+            ConnectionParams::from_str("exasol://localhost?user=testuser&password=secret").unwrap();
+
+        assert_eq!(params.password(), "secret");
+    }
+
+    #[test]
+    fn test_parse_password_from_query_pass() {
+        let params =
+            ConnectionParams::from_str("exasol://localhost?user=testuser&pass=secret").unwrap();
+
+        assert_eq!(params.password(), "secret");
+    }
+
+    #[test]
+    fn test_parse_auth_from_query_no_password() {
+        let params = ConnectionParams::from_str("exasol://localhost?user=testuser").unwrap();
+
+        assert_eq!(params.username, "testuser");
+        assert_eq!(params.password(), "");
+    }
+
+    // ============================================================
+    // IPv6 tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_ipv6_without_port() {
+        let params = ConnectionParams::from_str("exasol://user@[::1]").unwrap();
+
+        assert_eq!(params.host, "::1");
+        assert_eq!(params.port, 8563);
+    }
+
+    #[test]
+    fn test_parse_ipv6_full_address() {
+        let params = ConnectionParams::from_str("exasol://user@[2001:db8::1]:9000/schema").unwrap();
+
+        assert_eq!(params.host, "2001:db8::1");
+        assert_eq!(params.port, 9000);
+        assert_eq!(params.schema, Some("schema".to_string()));
+    }
+
+    // ============================================================
+    // Schema edge cases
+    // ============================================================
+
+    #[test]
+    fn test_parse_empty_schema_path() {
+        let params = ConnectionParams::from_str("exasol://user@localhost/").unwrap();
+
+        assert_eq!(params.schema, None);
+    }
+
+    #[test]
+    fn test_parse_schema_with_query_params() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost/MY_SCHEMA?tls=true").unwrap();
+
+        assert_eq!(params.schema, Some("MY_SCHEMA".to_string()));
+        assert!(params.use_tls);
+    }
+
+    // ============================================================
+    // Port parsing edge cases
+    // ============================================================
+
+    #[test]
+    fn test_parse_invalid_port() {
+        let result = ConnectionParams::from_str("exasol://user@localhost:not_a_port");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::ParseError(msg) if msg.contains("Invalid port")
+        ));
+    }
+
+    #[test]
+    fn test_parse_ipv6_invalid_port() {
+        let result = ConnectionParams::from_str("exasol://user@[::1]:invalid");
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConnectionError::ParseError(msg) if msg.contains("Invalid port")
+        ));
+    }
+
+    // ============================================================
+    // URL encoding edge cases
+    // ============================================================
+
+    #[test]
+    fn test_parse_url_encoded_query_params() {
+        let params =
+            ConnectionParams::from_str("exasol://user@localhost?client_name=my%20client").unwrap();
+
+        assert_eq!(params.client_name, "my client");
+    }
+
+    #[test]
+    fn test_parse_auth_without_password() {
+        let params = ConnectionParams::from_str("exasol://testuser@localhost").unwrap();
+
+        assert_eq!(params.username, "testuser");
+        assert_eq!(params.password(), "");
+    }
+
+    // ============================================================
+    // Whitespace handling tests
+    // ============================================================
+
+    #[test]
+    fn test_parse_url_with_whitespace_trim() {
+        let params = ConnectionParams::from_str("  exasol://user@localhost  ").unwrap();
+
+        assert_eq!(params.host, "localhost");
+        assert_eq!(params.username, "user");
+    }
 }
