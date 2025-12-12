@@ -1,5 +1,10 @@
 # Spec Oxide Configuration
 
+[paths]
 spec_folder = "specs/"
 changes_folder = "specs/_changes"
 archive_folder = "specs/_archive"
+
+[rules]
+system = ["mcp", "global", "coding", "testing", "backend", "frontend", "vcs"]
+custom = []

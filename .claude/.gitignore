@@ -1,0 +1,8 @@
+# Spox-managed Claude Code files
+# These files are managed by spox init and should not be committed
+
+# Spox agent definitions (implementer, reviewer, verifier)
+agents/spox-*.md
+
+# Spox slash commands directory
+commands/spox/

@@ -1,0 +1,52 @@
+{
+  "env": {
+    "DISABLE_TELEMETRY": "1"
+  },
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "mcp__serena__get_symbols_overview",
+      "mcp__serena__initial_instructions",
+      "mcp__serena__list_dir",
+      "mcp__serena__find_symbol",
+      "mcp__serena__think_about_collected_information",
+      "mcp__serena__think_about_whether_you_are_done",
+      "mcp__serena__think_about_task_adherence",
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__insert_after_symbol",
+      "mcp__serena__replace_symbol_body",
+      "mcp__serena__onboarding",
+      "mcp__serena__find_referencing_symbols",
+      "mcp__serena__find_file",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__get-library-docs",
+      "mcp__spox__list_specs",
+      "mcp__spox__get_spec_requirements",
+      "mcp__spox__get_scenario",
+      "mcp__spox__list_changes",
+      "mcp__spox__search_specs",
+      "mcp__spox__validate_change",
+      "mcp__spox__get_change",
+      "mcp__spox__validate_spec",
+      "Bash(mkdir:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(cargo:*)",
+      "Bash(spox:*)",
+      "Bash(xargs:*)",
+      "Bash(nm:*)",
+      "Bash(tee:*)",
+      "WebSearch",
+      "WebFetch"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "enableAllProjectMcpServers": true,
+  "fileExclusions": [
+    "target/**",
+    ".serena/**",
+    ".fastembed_cache/**",
+    ".git/**"
+  ]
+}

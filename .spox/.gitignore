@@ -1,4 +1,6 @@
-/specs
-/standards
+# Added by spox init
+/templates/
+/standards/
+/specs/
 workflow.md
 setup.sh
