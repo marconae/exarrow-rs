@@ -32,6 +32,7 @@ tmp
 
 # Specs
 specs/_archive
+specs/_recorded
 
 # Exclude coding agents
 .claude/
