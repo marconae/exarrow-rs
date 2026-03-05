@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.4
+
+- Removed WebSocket frame/message size limits to support large result sets (fixes #18)
+
 ## 0.6.3
 
 - Updated `bytes` (1.11.0 → 1.11.1) and `time` (0.3.45 → 0.3.47) to fix security vulnerabilities
