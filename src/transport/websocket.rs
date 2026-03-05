@@ -13,7 +13,9 @@ use futures_util::{SinkExt, StreamExt};
 use rustls::pki_types::CertificateDer;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
+    connect_async_tls_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+    Connector, MaybeTlsStream, WebSocketStream,
 };
 
 use crate::error::TransportError;
@@ -322,8 +324,14 @@ impl TransportProtocol for WebSocketTransport {
         };
 
         // Connect with optional TLS connector
+        // Set unlimited frame and message sizes because Exasol sends large frames
+        // for result sets that can exceed the tungstenite default of 16 MiB.
+        let mut ws_config = WebSocketConfig::default();
+        ws_config.max_frame_size = None;
+        ws_config.max_message_size = None;
         let connect_future = connect_async_tls_with_config(
-            &url, None,      // WebSocket config
+            &url,
+            Some(ws_config),
             false,     // disable_nagle
             connector, // TLS connector
         );
