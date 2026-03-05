@@ -1913,3 +1913,79 @@ async fn test_prepared_statement_parameter_types() {
         .expect("Failed to drop schema");
     conn.close().await.expect("Failed to close connection");
 }
+
+// Section 9: WebSocket Transport Regression Tests
+
+/// 9.1 Regression test for GitHub issue #18: large result sets exceeding the
+/// default 16 MiB WebSocket frame limit.
+///
+/// Creates a wide table with 5 VARCHAR columns, inserts 20,000 rows
+/// (~1 KB each via 200-char fills, total ~20 MB exceeding the 16 MiB default
+/// frame limit), queries all rows, and asserts the full row count is returned.
+#[tokio::test]
+async fn test_large_result_set_exceeds_default_frame_limit() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+
+    let schema_name = generate_test_schema_name();
+
+    conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await
+        .expect("CREATE SCHEMA should succeed");
+
+    // Create a wide table with multiple VARCHAR(1000) columns to get ~1 KB per row
+    conn.execute_update(&format!(
+        "CREATE TABLE {}.wide_test (
+            id INTEGER,
+            col1 VARCHAR(1000),
+            col2 VARCHAR(1000),
+            col3 VARCHAR(1000),
+            col4 VARCHAR(1000),
+            col5 VARCHAR(1000)
+        )",
+        schema_name
+    ))
+    .await
+    .expect("CREATE TABLE should succeed");
+
+    // Insert 20,000 rows of ~1 KB each using CONNECT BY LEVEL
+    // Total data size: ~20,000 * 1 KB = ~20 MB, exceeding the 16 MiB default frame limit
+    conn.execute_update(&format!(
+        r#"
+        INSERT INTO {}.wide_test (id, col1, col2, col3, col4, col5)
+        SELECT
+            LEVEL,
+            LPAD('A', 200, 'A'),
+            LPAD('B', 200, 'B'),
+            LPAD('C', 200, 'C'),
+            LPAD('D', 200, 'D'),
+            LPAD('E', 200, 'E')
+        FROM DUAL
+        CONNECT BY LEVEL <= 20000
+        "#,
+        schema_name
+    ))
+    .await
+    .expect("INSERT should succeed");
+
+    // Query all rows - this should trigger a large WebSocket frame
+    let all_batches = conn
+        .query(&format!(
+            "SELECT id, col1, col2, col3, col4, col5 FROM {}.wide_test",
+            schema_name
+        ))
+        .await
+        .expect("SELECT all rows should succeed (must handle frames > 16 MiB)");
+
+    // Count total rows across all batches
+    let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 20000,
+        "Should have all 20,000 rows returned despite large frame size"
+    );
+
+    // Cleanup
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
