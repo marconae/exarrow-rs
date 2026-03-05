@@ -23,8 +23,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
         with:
           path: |
@@ -35,14 +37,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build
+      - name: Build (debug)
         run: cargo build --verbose
 
-      - name: Build with FFI
+      - name: Build with FFI (release)
         run: cargo build --release --features ffi
 
   lint:
     name: Lint
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +55,17 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -60,6 +74,7 @@ jobs:
 
   licenses:
     name: License Check
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +87,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,7 +100,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Cache cargo registry
+      - name: Restore cache
         uses: actions/cache@v4
         with:
           path: |
@@ -100,6 +116,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
+    needs: [lint, licenses, unit-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,7 +129,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Cache cargo registry
+      - name: Restore cache
         uses: actions/cache@v4
         with:
           path: |
@@ -132,9 +149,6 @@ jobs:
             -p 8563:8563 \
             -e COSLWD_ENABLED=1 \
             exasol/docker-db:2025.2.0
-
-      - name: Build with FFI
-        run: cargo build --release --features ffi
 
       - name: Wait for Exasol to be ready
         run: ./scripts/wait_for_exasol.sh exasol-test 120
@@ -163,3 +177,67 @@ jobs:
         run: |
           docker stop exasol-test || true
           docker rm exasol-test || true
+
+  release:
+    name: Release
+    needs: [integration-tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract changelog for this version
+        if: steps.check.outputs.exists == 'false'
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BODY=$(awk "/^## ${VERSION}\$/{ found=1; next } /^## /{ if(found) exit } found{ print }" CHANGELOG.md)
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$BODY"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create git tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body: ${{ steps.changelog.outputs.body }}
+
+      - name: Install Rust toolchain
+        if: steps.check.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.exists == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: cargo publish
