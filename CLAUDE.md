@@ -2,12 +2,17 @@
 
 ## Prerequisites
 
-**Before running integration tests or examples**, ask the user to start the Exasol Docker container:
+**Before running integration tests or examples**, start the Exasol Docker container yourself (don't ask the user):
 ```bash
 docker run -d --name exasol-test -p 8563:8563 --privileged exasol/docker-db:latest
 ```
 
 Default credentials: `sys` / `exasol` on `localhost:8563`
+
+**Check Exasol is ready** before running tests:
+```bash
+exapump sql 'select 1'   # Uses default profile; should return "1"
+```
 
 ## Build & Test Commands
 
@@ -66,3 +71,9 @@ Specifications live in `specs/` using a `specs/<domain>/<feature>/spec.md` struc
 - TLS enabled by default; production Exasol requires it
 - Never log or expose connection passwords
 - Integration tests require running Exasol instance
+
+## Changelog
+
+- `CHANGELOG.md` must be updated with every version bump
+- Format: `## <version>` header followed by bullet points describing changes
+- Entries should be concise, user-facing descriptions (not internal implementation details)

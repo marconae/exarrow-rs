@@ -506,28 +506,35 @@ fn test_driver_manager_validates_arrow_schema() {
 /// This is the key verification test - it ensures that using the driver
 /// through the FFI/driver manager produces the same results as using
 /// the direct Rust API.
-#[tokio::test]
+#[test]
 
-async fn test_driver_manager_matches_direct_api() {
+fn test_driver_manager_matches_direct_api() {
     skip_if_no_library!();
     skip_if_no_exasol!();
 
-    // First, get results via direct API
-    let mut direct_conn = common::get_test_connection()
-        .await
-        .expect("Failed to connect via direct API");
+    // Run the direct API part in an explicit runtime (not #[tokio::test] to avoid nested runtime)
+    let direct_batches = {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            let mut direct_conn = common::get_test_connection()
+                .await
+                .expect("Failed to connect via direct API");
 
-    let direct_batches = direct_conn
-        .query("SELECT 42 AS answer, 'test' AS label")
-        .await
-        .expect("Failed to query via direct API");
+            let direct_batches = direct_conn
+                .query("SELECT 42 AS answer, 'test' AS label")
+                .await
+                .expect("Failed to query via direct API");
 
-    direct_conn
-        .close()
-        .await
-        .expect("Failed to close direct connection");
+            direct_conn
+                .close()
+                .await
+                .expect("Failed to close direct connection");
 
-    // Now, get results via driver manager
+            direct_batches
+        })
+    };
+
+    // Now, get results via driver manager (synchronous - uses FFI runtime internally)
     let lib_path = get_library_path();
 
     let mut driver = ManagedDriver::load_dynamic_from_filename(
@@ -953,7 +960,7 @@ fn test_bulk_ingest_create() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_INGEST_{}",
+        "TEST_INGEST_CREATE_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1042,7 +1049,7 @@ fn test_bulk_ingest_append() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_INGEST_{}",
+        "TEST_INGEST_APPEND_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1117,7 +1124,7 @@ fn test_bulk_ingest_replace() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_INGEST_{}",
+        "TEST_INGEST_REPLACE_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1216,7 +1223,7 @@ fn test_bulk_ingest_create_append() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_INGEST_{}",
+        "TEST_INGEST_CRAPPEND_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1304,7 +1311,7 @@ fn test_transaction_commit() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_TXN_{}",
+        "TEST_TXN_COMMIT_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1395,7 +1402,7 @@ fn test_transaction_rollback() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     let schema_name = format!(
-        "TEST_TXN_{}",
+        "TEST_TXN_ROLLBACK_{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

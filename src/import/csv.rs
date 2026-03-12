@@ -797,19 +797,6 @@ where
     .await
 }
 
-/// Internal function to orchestrate CSV import.
-///
-/// This function implements the correct IMPORT protocol flow:
-/// 1. Connects to Exasol via HTTP transport client (client mode)
-/// 2. Gets the internal address from the handshake response
-/// 3. Builds the IMPORT SQL statement using the internal address
-/// 4. Starts IMPORT SQL execution in parallel via WebSocket
-/// 5. Waits for HTTP GET request from Exasol
-/// 6. Sends HTTP response with CSV data using chunked encoding
-/// 7. Coordinates completion between HTTP and SQL tasks
-///
-/// # Protocol Flow
-///
 async fn import_csv_internal<F, Fut, S, SFut>(
     execute_sql: F,
     table: &str,
@@ -839,38 +826,42 @@ where
 
     let compression = options.compression;
 
-    // Spawn the data streaming task - this will wait for GET request from Exasol
-    let stream_handle = tokio::spawn(async move {
-        // Stream data through the established connection
-        // The stream_fn is responsible for:
-        // 1. Waiting for HTTP GET from Exasol (handle_import_request)
-        // 2. Sending chunked response data
-        // 3. Sending final chunk
-        stream_fn(client, compression).await?;
+    // Create the stream future — runs cooperatively on the same task via select!
+    // (no tokio::spawn needed, avoiding worker thread dependencies that cause
+    // deadlocks under block_on or constrained environments)
+    let stream_future = stream_fn(client, compression);
+    tokio::pin!(stream_future);
 
-        Ok::<(), ImportError>(())
-    });
+    // Pin the SQL future so it can be polled in select! and awaited later
+    let sql_future = execute_sql(sql);
+    tokio::pin!(sql_future);
 
-    // Execute the IMPORT SQL in parallel
-    // This triggers Exasol to send the HTTP GET request through the tunnel
-    let sql_result = execute_sql(sql).await;
-
-    // Wait for the stream task to complete
-    let stream_result = stream_handle.await;
-
-    // Handle results - check stream task first as it may have protocol errors
-    match stream_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(e),
-        Err(e) => {
-            return Err(ImportError::StreamError(format!(
-                "Stream task panicked: {e}"
-            )))
+    // Run SQL execution and data streaming concurrently on the same task.
+    // The stream normally completes before SQL for small batches — that's expected.
+    // If the stream errors, abort immediately without waiting for SQL.
+    let (sql_result, stream_done) = tokio::select! {
+        result = &mut sql_future => {
+            (result, false)
+        },
+        stream_result = &mut stream_future => {
+            match stream_result {
+                Err(e) => return Err(e),
+                Ok(()) => {
+                    (sql_future.await, true)
+                },
+            }
         }
+    };
+
+    // SQL completed — if it failed, drop stream_future (cancels it)
+    let row_count = sql_result.map_err(ImportError::SqlError)?;
+
+    // SQL succeeded — wait for stream to finish (unless it already completed)
+    if !stream_done {
+        stream_future.await?;
     }
 
-    // Return the row count from SQL execution
-    sql_result.map_err(ImportError::SqlError)
+    Ok(row_count)
 }
 
 /// Stream data from an async reader to the HTTP transport client.

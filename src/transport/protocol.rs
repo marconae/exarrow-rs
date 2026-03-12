@@ -254,6 +254,17 @@ pub trait TransportProtocol: Send + Sync {
 
     /// Check if the connection is still active.
     fn is_connected(&self) -> bool;
+
+    /// Set the autocommit mode on the server.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether to enable autocommit
+    ///
+    /// # Errors
+    ///
+    /// Returns `TransportError` if the operation fails.
+    async fn set_autocommit(&mut self, enabled: bool) -> Result<(), TransportError>;
 }
 
 /// Result of a query execution.

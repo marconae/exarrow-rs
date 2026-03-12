@@ -26,6 +26,7 @@ use super::messages::{
     CreatePreparedStatementResponse, DisconnectRequest, DisconnectResponse,
     ExecutePreparedStatementRequest, ExecuteRequest, ExecuteResponse, FetchRequest, FetchResponse,
     LoginInitRequest, LoginResponse, PublicKeyResponse, ResultData, ResultSetHandle, SessionInfo,
+    SetAttributesRequest, SetAttributesResponse,
 };
 use super::protocol::{
     ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
@@ -739,6 +740,19 @@ impl TransportProtocol for WebSocketTransport {
             self.state,
             ConnectionState::Connected | ConnectionState::Authenticated
         )
+    }
+
+    async fn set_autocommit(&mut self, enabled: bool) -> Result<(), TransportError> {
+        if self.state != ConnectionState::Authenticated {
+            return Err(TransportError::ProtocolError(
+                "Must authenticate before setting attributes".to_string(),
+            ));
+        }
+
+        let request = SetAttributesRequest::autocommit(enabled);
+        let response: SetAttributesResponse = self.send_receive(&request).await?;
+        self.check_status(&response.status, &response.exception)?;
+        Ok(())
     }
 }
 

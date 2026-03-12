@@ -74,17 +74,20 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 use crate::adbc::Connection as ExaConnection;
-use crate::error::ExasolError;
+use crate::error::{ExasolError, QueryError};
 use crate::transport::messages::DataType as TransportDataType;
 use crate::transport::protocol::PreparedStatementHandle;
 use crate::types::{ExasolType, TypeMapper};
 
 /// Global tokio runtime for async-to-sync bridging.
-/// This is lazily initialized on first use.
+///
+/// Uses 2 worker threads so the I/O reactor remains available
+/// even when one worker is parked in `block_on` during import.
 fn get_runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("Failed to create tokio runtime for ADBC FFI")
@@ -105,9 +108,20 @@ fn quote_identifier(name: &str) -> String {
 }
 
 /// Build a fully-qualified, properly-quoted table name.
+///
+/// If `schema` is provided, it is quoted separately and prepended.
+/// If `schema` is None but `table` contains a dot, the first dot is treated
+/// as a schema/table separator so that `"SCHEMA.TABLE"` becomes `"SCHEMA"."TABLE"`
+/// rather than a single quoted identifier containing a literal dot.
 fn build_qualified_table_name(schema: Option<&str>, table: &str) -> String {
     if let Some(schema) = schema {
         format!("{}.{}", quote_identifier(schema), quote_identifier(table))
+    } else if let Some((schema_part, table_part)) = table.split_once('.') {
+        format!(
+            "{}.{}",
+            quote_identifier(schema_part),
+            quote_identifier(table_part)
+        )
     } else {
         quote_identifier(table)
     }
@@ -752,6 +766,19 @@ impl FfiConnection {
     }
 }
 
+impl Drop for FfiConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.inner.take() {
+            // Attempt graceful shutdown: close WebSocket and session
+            // to prevent lingering I/O tasks on the static runtime.
+            let _ = get_runtime().block_on(async {
+                let conn = conn.lock().await;
+                conn.shutdown().await
+            });
+        }
+    }
+}
+
 impl Optionable for FfiConnection {
     type Option = OptionConnection;
 
@@ -777,7 +804,10 @@ impl Optionable for FfiConnection {
                             get_runtime()
                                 .block_on(async {
                                     let mut conn = conn_arc.lock().await;
-                                    conn.commit().await
+                                    if conn.in_transaction() {
+                                        conn.commit().await?;
+                                    }
+                                    Ok::<(), QueryError>(())
                                 })
                                 .map_err(to_adbc_error)?;
                         }
@@ -1292,17 +1322,26 @@ impl adbc_core::Connection for FfiConnection {
 
         catalog_name_builder.append_value("EXA");
 
+        let builder_err = |field: &str| {
+            AdbcError::with_message_and_status(
+                format!("Failed to access Arrow builder for field '{field}'"),
+                AdbcStatus::Internal,
+            )
+        };
+
         if include_schemas {
             for schema_name in &schemas {
                 // Access the struct builder for this schema entry
                 let struct_builder = schema_list_builder.values();
-                let schema_name_builder = struct_builder.field_builder::<StringBuilder>(0).unwrap();
+                let schema_name_builder = struct_builder
+                    .field_builder::<StringBuilder>(0)
+                    .ok_or_else(|| builder_err("db_schema_name"))?;
                 schema_name_builder.append_value(schema_name);
 
                 // Tables list for this schema
                 let tables_list_builder = struct_builder
                     .field_builder::<ListBuilder<StructBuilder>>(1)
-                    .unwrap();
+                    .ok_or_else(|| builder_err("db_schema_tables"))?;
 
                 if include_tables {
                     if let Some(schema_tables) = tables.get(schema_name) {
@@ -1312,18 +1351,18 @@ impl adbc_core::Connection for FfiConnection {
                             // table_name
                             table_struct
                                 .field_builder::<StringBuilder>(0)
-                                .unwrap()
+                                .ok_or_else(|| builder_err("table_name"))?
                                 .append_value(tbl_name);
                             // table_type
                             table_struct
                                 .field_builder::<StringBuilder>(1)
-                                .unwrap()
+                                .ok_or_else(|| builder_err("table_type"))?
                                 .append_value(tbl_type);
 
                             // table_columns
                             let columns_list = table_struct
                                 .field_builder::<ListBuilder<StructBuilder>>(2)
-                                .unwrap();
+                                .ok_or_else(|| builder_err("table_columns"))?;
                             if include_columns {
                                 let key = (schema_name.clone(), tbl_name.clone());
                                 if let Some(cols) = columns.get(&key) {
@@ -1331,15 +1370,15 @@ impl adbc_core::Connection for FfiConnection {
                                         let col_struct = columns_list.values();
                                         col_struct
                                             .field_builder::<StringBuilder>(0)
-                                            .unwrap()
+                                            .ok_or_else(|| builder_err("column_name"))?
                                             .append_value(col_name);
                                         col_struct
                                             .field_builder::<Int32Builder>(1)
-                                            .unwrap()
+                                            .ok_or_else(|| builder_err("ordinal_position"))?
                                             .append_value(*ordinal);
                                         col_struct
                                             .field_builder::<StringBuilder>(2)
-                                            .unwrap()
+                                            .ok_or_else(|| builder_err("xdbc_type_name"))?
                                             .append_value(type_name);
                                         col_struct.append(true);
                                     }
@@ -1352,7 +1391,7 @@ impl adbc_core::Connection for FfiConnection {
                             // table_constraints (always null/empty)
                             let constraints_list = table_struct
                                 .field_builder::<ListBuilder<StructBuilder>>(3)
-                                .unwrap();
+                                .ok_or_else(|| builder_err("table_constraints"))?;
                             constraints_list.append(false); // null
 
                             table_struct.append(true);
@@ -1517,6 +1556,12 @@ impl adbc_core::Connection for FfiConnection {
     }
 
     fn commit(&mut self) -> AdbcResult<()> {
+        if self.auto_commit {
+            return Err(AdbcError::with_message_and_status(
+                "Cannot commit when autocommit is enabled",
+                AdbcStatus::InvalidState,
+            ));
+        }
         let conn_arc = self.ensure_connected()?;
         get_runtime()
             .block_on(async {
@@ -1527,6 +1572,12 @@ impl adbc_core::Connection for FfiConnection {
     }
 
     fn rollback(&mut self) -> AdbcResult<()> {
+        if self.auto_commit {
+            return Err(AdbcError::with_message_and_status(
+                "Cannot rollback when autocommit is enabled",
+                AdbcStatus::InvalidState,
+            ));
+        }
         let conn_arc = self.ensure_connected()?;
         get_runtime()
             .block_on(async {
@@ -1846,12 +1897,14 @@ impl adbc_core::Statement for FfiStatement {
         let batches = if let Some(ref conn_arc) = self.conn {
             // Reuse the shared connection
             let conn_arc = Arc::clone(conn_arc);
-            get_runtime()
-                .block_on(async {
-                    let mut conn = conn_arc.lock().await;
-                    conn.query(&sql).await
-                })
-                .map_err(to_adbc_error)?
+            match get_runtime().block_on(async {
+                let mut conn = conn_arc.lock().await;
+                conn.query(&sql).await
+            }) {
+                Ok(batches) => batches,
+                Err(QueryError::NoResultSet(_)) => vec![],
+                Err(e) => return Err(to_adbc_error(e)),
+            }
         } else {
             // Fallback: ephemeral connection (no parent connection available)
             let uri = self.uri.clone();
@@ -1859,9 +1912,13 @@ impl adbc_core::Statement for FfiStatement {
                 .block_on(async {
                     let params: crate::connection::ConnectionParams = uri.parse()?;
                     let mut conn = ExaConnection::from_params(params).await?;
-                    let batches = conn.query(&sql).await?;
+                    let result = conn.query(&sql).await;
                     conn.close().await?;
-                    Ok::<_, ExasolError>(batches)
+                    match result {
+                        Ok(batches) => Ok(batches),
+                        Err(QueryError::NoResultSet(_)) => Ok(vec![]),
+                        Err(e) => Err(ExasolError::from(e)),
+                    }
                 })
                 .map_err(to_adbc_error)?
         };

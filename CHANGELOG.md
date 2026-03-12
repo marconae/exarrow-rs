@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+- ADBC bulk ingestion support (create, append, replace, create-append modes) via `IngestTargetTable` and `IngestMode` statement options
+- `GetObjects` implementation returning catalog/schema/table/column metadata at configurable depth
+- `GetTableSchema` for retrieving Arrow schema of existing Exasol tables
+- `GetParameterSchema` for retrieving parameter types from prepared statements
+- Transaction support with autocommit control, explicit `commit()` and `rollback()`
+
 ## 0.6.4
 
 - Removed WebSocket frame/message size limits to support large result sets (fixes #18)

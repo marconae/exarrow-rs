@@ -789,6 +789,7 @@ mod tests {
             async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
             async fn close(&mut self) -> Result<(), crate::error::TransportError>;
             fn is_connected(&self) -> bool;
+            async fn set_autocommit(&mut self, enabled: bool) -> Result<(), crate::error::TransportError>;
         }
     }
 
