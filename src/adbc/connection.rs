@@ -683,26 +683,21 @@ impl Connection {
         schema: Option<&str>,
         table: Option<&str>,
     ) -> Result<ResultSet, QueryError> {
-        let mut conditions = Vec::new();
+        let mut conditions = vec!["OBJECT_TYPE IN ('TABLE', 'VIEW')".to_string()];
 
-        if let Some(cat) = catalog {
-            conditions.push(format!("TABLE_SCHEMA = '{}'", cat.replace('\'', "''")));
-        }
+        // Exasol has no catalogs — ignore the catalog parameter
+        let _ = catalog;
         if let Some(sch) = schema {
-            conditions.push(format!("TABLE_SCHEMA = '{}'", sch.replace('\'', "''")));
+            conditions.push(format!("ROOT_NAME = '{}'", sch.replace('\'', "''")));
         }
         if let Some(tbl) = table {
-            conditions.push(format!("TABLE_NAME = '{}'", tbl.replace('\'', "''")));
+            conditions.push(format!("OBJECT_NAME = '{}'", tbl.replace('\'', "''")));
         }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
         let sql = format!(
-            "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM SYS.EXA_ALL_TABLES {} ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            "SELECT ROOT_NAME AS TABLE_SCHEMA, OBJECT_NAME AS TABLE_NAME, OBJECT_TYPE AS TABLE_TYPE FROM SYS.EXA_ALL_OBJECTS {} ORDER BY ROOT_NAME, OBJECT_NAME",
             where_clause
         );
 

@@ -1016,7 +1016,9 @@ impl adbc_core::Connection for FfiConnection {
         table_type: Option<Vec<&str>>,
         column_name: Option<&str>,
     ) -> AdbcResult<impl RecordBatchReader + Send> {
-        use arrow::array::builder::{Int32Builder, ListBuilder, StringBuilder, StructBuilder};
+        use arrow::array::builder::{
+            ArrayBuilder, Int32Builder, ListBuilder, StringBuilder, StructBuilder,
+        };
         use arrow::datatypes::{DataType, Field, Fields};
 
         // Check catalog filter - Exasol only has "EXA"
@@ -1094,17 +1096,17 @@ impl adbc_core::Connection for FfiConnection {
         // Query tables grouped by schema
         let tables: std::collections::HashMap<String, Vec<(String, String)>> = if include_tables {
             let mut sql =
-                "SELECT TABLE_NAME, TABLE_TYPE, TABLE_SCHEMA FROM SYS.EXA_ALL_TABLES".to_string();
-            let mut conditions = Vec::new();
+                "SELECT OBJECT_NAME, OBJECT_TYPE, ROOT_NAME FROM SYS.EXA_ALL_OBJECTS".to_string();
+            let mut conditions = vec!["OBJECT_TYPE IN ('TABLE', 'VIEW')".to_string()];
             if let Some(schema_filter) = db_schema {
                 conditions.push(format!(
-                    "TABLE_SCHEMA LIKE '{}'",
+                    "ROOT_NAME LIKE '{}'",
                     schema_filter.replace('\'', "''")
                 ));
             }
             if let Some(tbl_name) = table_name {
                 conditions.push(format!(
-                    "TABLE_NAME LIKE '{}'",
+                    "OBJECT_NAME LIKE '{}'",
                     tbl_name.replace('\'', "''")
                 ));
             }
@@ -1113,13 +1115,13 @@ impl adbc_core::Connection for FfiConnection {
                     .iter()
                     .map(|t| format!("'{}'", t.replace('\'', "''")))
                     .collect();
-                conditions.push(format!("TABLE_TYPE IN ({})", types_str.join(",")));
+                conditions.push(format!("OBJECT_TYPE IN ({})", types_str.join(",")));
             }
             if !conditions.is_empty() {
                 sql.push_str(" WHERE ");
                 sql.push_str(&conditions.join(" AND "));
             }
-            sql.push_str(" ORDER BY TABLE_SCHEMA, TABLE_NAME");
+            sql.push_str(" ORDER BY ROOT_NAME, OBJECT_NAME");
 
             let batches = {
                 let conn_arc = Arc::clone(&conn_arc);
@@ -1340,13 +1342,17 @@ impl adbc_core::Connection for FfiConnection {
 
                 // Tables list for this schema
                 let tables_list_builder = struct_builder
-                    .field_builder::<ListBuilder<StructBuilder>>(1)
+                    .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(1)
                     .ok_or_else(|| builder_err("db_schema_tables"))?;
 
                 if include_tables {
                     if let Some(schema_tables) = tables.get(schema_name) {
                         for (tbl_name, tbl_type) in schema_tables {
-                            let table_struct = tables_list_builder.values();
+                            let table_struct = tables_list_builder
+                                .values()
+                                .as_any_mut()
+                                .downcast_mut::<StructBuilder>()
+                                .ok_or_else(|| builder_err("db_schema_tables downcast"))?;
 
                             // table_name
                             table_struct
@@ -1361,13 +1367,17 @@ impl adbc_core::Connection for FfiConnection {
 
                             // table_columns
                             let columns_list = table_struct
-                                .field_builder::<ListBuilder<StructBuilder>>(2)
+                                .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(2)
                                 .ok_or_else(|| builder_err("table_columns"))?;
                             if include_columns {
                                 let key = (schema_name.clone(), tbl_name.clone());
                                 if let Some(cols) = columns.get(&key) {
                                     for (col_name, ordinal, type_name) in cols {
-                                        let col_struct = columns_list.values();
+                                        let col_struct = columns_list
+                                            .values()
+                                            .as_any_mut()
+                                            .downcast_mut::<StructBuilder>()
+                                            .ok_or_else(|| builder_err("table_columns downcast"))?;
                                         col_struct
                                             .field_builder::<StringBuilder>(0)
                                             .ok_or_else(|| builder_err("column_name"))?
@@ -1390,7 +1400,7 @@ impl adbc_core::Connection for FfiConnection {
 
                             // table_constraints (always null/empty)
                             let constraints_list = table_struct
-                                .field_builder::<ListBuilder<StructBuilder>>(3)
+                                .field_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(3)
                                 .ok_or_else(|| builder_err("table_constraints"))?;
                             constraints_list.append(false); // null
 
