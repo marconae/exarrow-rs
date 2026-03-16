@@ -2257,3 +2257,200 @@ fn test_get_table_schema_timestamp_with_precision() {
         let _ = stmt.execute_update();
     }
 }
+
+/// Test that get_table_schema succeeds for a table containing all Exasol data types.
+///
+/// This verifies that the type parser handles every Exasol type without
+/// producing "Unknown Exasol type" errors.
+#[test]
+
+fn test_get_table_schema_all_types() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let uri = get_test_uri();
+    let opts = vec![(OptionDatabase::Uri, OptionValue::String(uri))];
+    let db = driver
+        .new_database_with_opts(opts)
+        .expect("Failed to create database");
+
+    let mut conn = db.new_connection().expect("Failed to create connection");
+
+    let schema_name = format!(
+        "TEST_ALL_TYPES_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Create schema
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Create table with all Exasol data types
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.ALL_TYPES (\
+                col_boolean BOOLEAN, \
+                col_char CHAR(10), \
+                col_varchar VARCHAR(100), \
+                col_decimal DECIMAL(18,0), \
+                col_double DOUBLE PRECISION, \
+                col_date DATE, \
+                col_timestamp TIMESTAMP, \
+                col_timestamp_tz TIMESTAMP WITH LOCAL TIME ZONE, \
+                col_interval_ym INTERVAL YEAR TO MONTH, \
+                col_interval_ds INTERVAL DAY TO SECOND, \
+                col_geometry GEOMETRY, \
+                col_hashtype HASHTYPE\
+            )",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Call get_table_schema and verify it succeeds for all types
+    let table_schema = conn
+        .get_table_schema(None, Some(&schema_name), "ALL_TYPES")
+        .expect("get_table_schema should not fail for any Exasol type");
+
+    assert_eq!(
+        table_schema.fields().len(),
+        12,
+        "Expected 12 fields in schema"
+    );
+
+    // Verify all column names are present
+    let expected_names = [
+        "COL_BOOLEAN",
+        "COL_CHAR",
+        "COL_VARCHAR",
+        "COL_DECIMAL",
+        "COL_DOUBLE",
+        "COL_DATE",
+        "COL_TIMESTAMP",
+        "COL_TIMESTAMP_TZ",
+        "COL_INTERVAL_YM",
+        "COL_INTERVAL_DS",
+        "COL_GEOMETRY",
+        "COL_HASHTYPE",
+    ];
+    for (i, expected_name) in expected_names.iter().enumerate() {
+        assert_eq!(
+            table_schema.field(i).name(),
+            *expected_name,
+            "Column {} should be named {}",
+            i,
+            expected_name
+        );
+    }
+
+    // Cleanup
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        let _ = stmt.execute_update();
+    }
+}
+
+/// Test that querying a TIMESTAMP WITH LOCAL TIME ZONE column returns data
+/// without "Unsupported Exasol type" errors.
+#[test]
+
+fn test_query_timestamp_with_local_time_zone() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let uri = get_test_uri();
+    let opts = vec![(OptionDatabase::Uri, OptionValue::String(uri))];
+    let db = driver
+        .new_database_with_opts(opts)
+        .expect("Failed to create database");
+
+    let mut conn = db.new_connection().expect("Failed to create connection");
+
+    let schema_name = format!(
+        "TEST_TS_TZ_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Create schema
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Create table with TIMESTAMP WITH LOCAL TIME ZONE column
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.TS_TZ_TABLE (id INTEGER, ts_tz TIMESTAMP WITH LOCAL TIME ZONE)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Insert a value
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "INSERT INTO {}.TS_TZ_TABLE VALUES (1, TIMESTAMP '2024-01-15 10:30:00')",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Query the data back
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("SELECT id, ts_tz FROM {}.TS_TZ_TABLE", schema_name))
+            .unwrap();
+
+        let mut reader = stmt
+            .execute()
+            .expect("Query with TIMESTAMP WITH LOCAL TIME ZONE should succeed");
+
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1, "Expected 1 row");
+        assert_eq!(batch.num_columns(), 2, "Expected 2 columns");
+    }
+
+    // Cleanup
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        let _ = stmt.execute_update();
+    }
+}

@@ -290,6 +290,10 @@ fn parse_exasol_type(
             })
         }
 
+        "TIMESTAMP WITH LOCAL TIME ZONE" => Ok(ExasolType::Timestamp {
+            with_local_time_zone: true,
+        }),
+
         "INTERVAL YEAR TO MONTH" => Ok(ExasolType::IntervalYearToMonth),
 
         "INTERVAL DAY TO SECOND" => {
@@ -885,5 +889,69 @@ mod tests {
             .unwrap();
         assert_eq!(batch.num_rows(), 0);
         assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[test]
+    fn test_parse_timestamp_with_local_time_zone() {
+        // When the WebSocket API sends type_name "TIMESTAMP WITH LOCAL TIME ZONE",
+        // it should be parsed as ExasolType::Timestamp { with_local_time_zone: true }
+        let dt = DataType {
+            type_name: "TIMESTAMP WITH LOCAL TIME ZONE".to_string(),
+            precision: None,
+            scale: None,
+            size: None,
+            character_set: None,
+            with_local_time_zone: None,
+            fraction: None,
+        };
+        let result = parse_exasol_type(&dt).unwrap();
+        assert_eq!(
+            result,
+            ExasolType::Timestamp {
+                with_local_time_zone: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_without_local_time_zone() {
+        // Regular TIMESTAMP without withLocalTimeZone property should default to false
+        let dt = DataType {
+            type_name: "TIMESTAMP".to_string(),
+            precision: None,
+            scale: None,
+            size: None,
+            character_set: None,
+            with_local_time_zone: None,
+            fraction: None,
+        };
+        let result = parse_exasol_type(&dt).unwrap();
+        assert_eq!(
+            result,
+            ExasolType::Timestamp {
+                with_local_time_zone: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_with_local_time_zone_property() {
+        // TIMESTAMP with withLocalTimeZone=true property should also work
+        let dt = DataType {
+            type_name: "TIMESTAMP".to_string(),
+            precision: None,
+            scale: None,
+            size: None,
+            character_set: None,
+            with_local_time_zone: Some(true),
+            fraction: None,
+        };
+        let result = parse_exasol_type(&dt).unwrap();
+        assert_eq!(
+            result,
+            ExasolType::Timestamp {
+                with_local_time_zone: true
+            }
+        );
     }
 }

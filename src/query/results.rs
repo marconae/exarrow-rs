@@ -292,6 +292,9 @@ impl ResultSet {
             "TIMESTAMP" => ExasolType::Timestamp {
                 with_local_time_zone: data_type.with_local_time_zone.unwrap_or(false),
             },
+            "TIMESTAMP WITH LOCAL TIME ZONE" => ExasolType::Timestamp {
+                with_local_time_zone: true,
+            },
             "INTERVAL YEAR TO MONTH" => ExasolType::IntervalYearToMonth,
             "INTERVAL DAY TO SECOND" => ExasolType::IntervalDayToSecond {
                 precision: data_type.fraction.unwrap_or(3) as u8,

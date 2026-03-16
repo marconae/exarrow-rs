@@ -191,11 +191,11 @@ fn parse_exasol_type_string(type_str: &str) -> AdbcResult<ExasolType> {
             with_local_time_zone: false,
         });
     }
-    if type_upper == "INTERVAL YEAR TO MONTH" {
+    if type_upper.starts_with("INTERVAL YEAR") && type_upper.contains("TO MONTH") {
         return Ok(ExasolType::IntervalYearToMonth);
     }
-    if type_upper.starts_with("INTERVAL DAY TO SECOND") {
-        let precision = extract_single_param(&type_upper).unwrap_or(3);
+    if type_upper.starts_with("INTERVAL DAY") && type_upper.contains("TO SECOND") {
+        let precision = extract_last_param(&type_upper).unwrap_or(3);
         return Ok(ExasolType::IntervalDayToSecond {
             precision: precision as u8,
         });
@@ -259,6 +259,16 @@ fn extract_single_param(s: &str) -> Option<i64> {
     s[start + 1..end].trim().parse().ok()
 }
 
+fn extract_last_param(s: &str) -> Option<i64> {
+    let start = s.rfind('(')?;
+    let end = s.rfind(')')?;
+    if start < end {
+        s[start + 1..end].trim().parse().ok()
+    } else {
+        None
+    }
+}
+
 fn extract_two_params(s: &str) -> Option<(i64, i64)> {
     let start = s.find('(')?;
     let end = s.find(')')?;
@@ -286,6 +296,9 @@ fn transport_datatype_to_exasol(dt: &TransportDataType) -> AdbcResult<ExasolType
         "DOUBLE" | "DOUBLE PRECISION" => Ok(ExasolType::Double),
         "TIMESTAMP" => Ok(ExasolType::Timestamp {
             with_local_time_zone: dt.with_local_time_zone.unwrap_or(false),
+        }),
+        "TIMESTAMP WITH LOCAL TIME ZONE" => Ok(ExasolType::Timestamp {
+            with_local_time_zone: true,
         }),
         "CHAR" => Ok(ExasolType::Char {
             size: dt.size.unwrap_or(1) as usize,
@@ -2551,5 +2564,38 @@ mod tests {
         assert!(stmt.auto_commit);
         stmt.auto_commit = false;
         assert!(!stmt.auto_commit);
+    }
+
+    #[test]
+    fn test_parse_interval_year_to_month_with_precision() {
+        let t = parse_exasol_type_string("INTERVAL YEAR(2) TO MONTH").unwrap();
+        assert_eq!(t, ExasolType::IntervalYearToMonth);
+
+        let t = parse_exasol_type_string("INTERVAL YEAR(5) TO MONTH").unwrap();
+        assert_eq!(t, ExasolType::IntervalYearToMonth);
+    }
+
+    #[test]
+    fn test_parse_interval_year_to_month_bare() {
+        let t = parse_exasol_type_string("INTERVAL YEAR TO MONTH").unwrap();
+        assert_eq!(t, ExasolType::IntervalYearToMonth);
+    }
+
+    #[test]
+    fn test_parse_interval_day_to_second_with_precision() {
+        let t = parse_exasol_type_string("INTERVAL DAY(2) TO SECOND(3)").unwrap();
+        assert_eq!(t, ExasolType::IntervalDayToSecond { precision: 3 });
+
+        let t = parse_exasol_type_string("INTERVAL DAY(9) TO SECOND(9)").unwrap();
+        assert_eq!(t, ExasolType::IntervalDayToSecond { precision: 9 });
+    }
+
+    #[test]
+    fn test_parse_interval_day_to_second_bare() {
+        let t = parse_exasol_type_string("INTERVAL DAY TO SECOND").unwrap();
+        assert_eq!(t, ExasolType::IntervalDayToSecond { precision: 3 });
+
+        let t = parse_exasol_type_string("INTERVAL DAY TO SECOND(6)").unwrap();
+        assert_eq!(t, ExasolType::IntervalDayToSecond { precision: 6 });
     }
 }
