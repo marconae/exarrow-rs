@@ -465,13 +465,12 @@ impl ResultSet {
                     }
                     Arc::new(builder.finish())
                 }
-                DataType::Timestamp(_, _) => {
+                DataType::Timestamp(_, tz) => {
                     let mut builder = TimestampMicrosecondBuilder::new();
                     for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
-                            // Parse timestamp string to microseconds since Unix epoch
                             match Self::parse_timestamp_to_micros(s) {
                                 Ok(micros) => builder.append_value(micros),
                                 Err(_) => builder.append_null(),
@@ -480,7 +479,12 @@ impl ResultSet {
                             builder.append_null();
                         }
                     }
-                    Arc::new(builder.finish())
+                    let array = builder.finish();
+                    if tz.is_some() {
+                        Arc::new(array.with_timezone("UTC"))
+                    } else {
+                        Arc::new(array)
+                    }
                 }
                 _ => {
                     // Fallback to string for unsupported types
