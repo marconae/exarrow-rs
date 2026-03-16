@@ -1479,6 +1479,83 @@ fn test_transaction_rollback() {
 }
 
 #[test]
+fn test_commit_after_rollback_succeeds() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let uri = get_test_uri();
+    let opts = vec![(OptionDatabase::Uri, OptionValue::String(uri))];
+    let db = driver
+        .new_database_with_opts(opts)
+        .expect("Failed to create database");
+
+    let mut conn = db.new_connection().expect("Failed to create connection");
+
+    // Disable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "false".into())
+        .unwrap();
+
+    // Execute a SELECT to start a transaction
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query("SELECT 1 FROM DUAL").unwrap();
+        let mut reader = stmt.execute().unwrap();
+        let _batch = reader.next().unwrap().unwrap();
+    }
+
+    // Rollback
+    conn.rollback().unwrap();
+
+    // Commit after rollback should succeed (no active transaction is a no-op)
+    conn.commit().unwrap();
+
+    // Re-enable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "true".into())
+        .unwrap();
+}
+
+#[test]
+fn test_rollback_without_transaction_succeeds() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let uri = get_test_uri();
+    let opts = vec![(OptionDatabase::Uri, OptionValue::String(uri))];
+    let db = driver
+        .new_database_with_opts(opts)
+        .expect("Failed to create database");
+
+    let mut conn = db.new_connection().expect("Failed to create connection");
+
+    // Disable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "false".into())
+        .unwrap();
+
+    // Rollback without any prior statement should succeed
+    conn.rollback().unwrap();
+
+    // Re-enable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "true".into())
+        .unwrap();
+}
+
+#[test]
 
 fn test_autocommit_default() {
     skip_if_no_library!();
@@ -2089,6 +2166,90 @@ fn test_driver_manager_get_objects() {
     }
 
     // Cleanup: drop test schema
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        let _ = stmt.execute_update();
+    }
+}
+
+#[test]
+
+fn test_get_table_schema_timestamp_with_precision() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let uri = get_test_uri();
+    let opts = vec![(OptionDatabase::Uri, OptionValue::String(uri))];
+    let db = driver
+        .new_database_with_opts(opts)
+        .expect("Failed to create database");
+
+    let mut conn = db.new_connection().expect("Failed to create connection");
+
+    let schema_name = format!(
+        "TEST_TS_PREC_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Create schema and table with TIMESTAMP(3) column
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.TS_TABLE (id INTEGER, ts3 TIMESTAMP(3), ts6 TIMESTAMP(6))",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Call get_table_schema and verify it succeeds
+    let table_schema = conn
+        .get_table_schema(None, Some(&schema_name), "TS_TABLE")
+        .expect("get_table_schema should not fail for TIMESTAMP(3) columns");
+
+    assert_eq!(
+        table_schema.fields().len(),
+        3,
+        "Expected 3 fields in schema"
+    );
+
+    // Verify the timestamp fields have the correct Arrow type
+    let ts3_field = table_schema.field(1);
+    assert_eq!(ts3_field.name(), "TS3");
+    assert!(
+        matches!(ts3_field.data_type(), DataType::Timestamp(_, _)),
+        "Expected Timestamp type for TS3, got: {:?}",
+        ts3_field.data_type()
+    );
+
+    let ts6_field = table_schema.field(2);
+    assert_eq!(ts6_field.name(), "TS6");
+    assert!(
+        matches!(ts6_field.data_type(), DataType::Timestamp(_, _)),
+        "Expected Timestamp type for TS6, got: {:?}",
+        ts6_field.data_type()
+    );
+
+    // Cleanup
     {
         let mut stmt = conn.new_statement().expect("Failed to create statement");
         stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
