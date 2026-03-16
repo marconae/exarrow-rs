@@ -181,12 +181,12 @@ fn parse_exasol_type_string(type_str: &str) -> AdbcResult<ExasolType> {
     if type_upper == "DOUBLE" || type_upper == "DOUBLE PRECISION" {
         return Ok(ExasolType::Double);
     }
-    if type_upper == "TIMESTAMP WITH LOCAL TIME ZONE" {
+    if type_upper.starts_with("TIMESTAMP") && type_upper.ends_with("WITH LOCAL TIME ZONE") {
         return Ok(ExasolType::Timestamp {
             with_local_time_zone: true,
         });
     }
-    if type_upper == "TIMESTAMP" {
+    if type_upper.starts_with("TIMESTAMP") {
         return Ok(ExasolType::Timestamp {
             with_local_time_zone: false,
         });
@@ -2265,6 +2265,40 @@ mod tests {
                 with_local_time_zone: true
             }
         );
+    }
+
+    #[test]
+    fn test_parse_exasol_type_timestamp_with_precision() {
+        for input in &["TIMESTAMP(3)", "TIMESTAMP(6)", "TIMESTAMP(9)", "TIMESTAMP"] {
+            let t = parse_exasol_type_string(input).unwrap();
+            assert_eq!(
+                t,
+                ExasolType::Timestamp {
+                    with_local_time_zone: false
+                },
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_exasol_type_timestamp_with_local_time_zone_precision() {
+        for input in &[
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+            "TIMESTAMP(3) WITH LOCAL TIME ZONE",
+            "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+        ] {
+            let t = parse_exasol_type_string(input).unwrap();
+            assert_eq!(
+                t,
+                ExasolType::Timestamp {
+                    with_local_time_zone: true
+                },
+                "Failed for input: {}",
+                input
+            );
+        }
     }
 
     #[test]

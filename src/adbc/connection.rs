@@ -538,7 +538,10 @@ impl Connection {
     }
 
     pub async fn commit(&mut self) -> Result<(), QueryError> {
-        // Execute COMMIT statement
+        if !self.in_transaction() {
+            return Ok(());
+        }
+
         self.execute_update("COMMIT").await?;
 
         self.session
@@ -546,31 +549,18 @@ impl Connection {
             .await
             .map_err(|e| QueryError::TransactionError(e.to_string()))?;
 
-        // Re-enable autocommit on the server
-        self.transport
-            .lock()
-            .await
-            .set_autocommit(true)
-            .await
-            .map_err(|e| QueryError::TransactionError(e.to_string()))?;
-
         Ok(())
     }
 
     pub async fn rollback(&mut self) -> Result<(), QueryError> {
-        // Execute ROLLBACK statement
+        if !self.in_transaction() {
+            return Ok(());
+        }
+
         self.execute_update("ROLLBACK").await?;
 
         self.session
             .rollback_transaction()
-            .await
-            .map_err(|e| QueryError::TransactionError(e.to_string()))?;
-
-        // Re-enable autocommit on the server
-        self.transport
-            .lock()
-            .await
-            .set_autocommit(true)
             .await
             .map_err(|e| QueryError::TransactionError(e.to_string()))?;
 
