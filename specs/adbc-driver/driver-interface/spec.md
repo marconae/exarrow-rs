@@ -62,3 +62,11 @@ The system implements the ADBC (Arrow Database Connectivity) driver interface to
 * *WHEN* a type conversion fails
 * *THEN* it SHALL return a clear error indicating the problematic type
 * *AND* it SHALL specify which column and row caused the error
+
+### Scenario: Parameterized TIMESTAMP type parsing in FFI layer
+
+* *GIVEN* an active ADBC connection via the FFI driver manager
+* *AND* a table exists with a `TIMESTAMP(3)` column
+* *WHEN* retrieving the table schema via `get_table_schema`
+* *THEN* the driver SHALL parse `TIMESTAMP(3)` as a valid TIMESTAMP type
+* *AND* the driver SHALL NOT return an "Unknown Exasol type" error

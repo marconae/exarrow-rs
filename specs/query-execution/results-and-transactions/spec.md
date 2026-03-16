@@ -40,17 +40,37 @@ Query results are retrieved efficiently with support for both small single-fetch
 
 ### Scenario: Transaction commit
 
-* *GIVEN* a transaction is in progress
+* *GIVEN* autocommit is disabled on the connection
+* *AND* a transaction is in progress
 * *WHEN* committing a transaction
 * *THEN* it SHALL execute COMMIT
 * *AND* it SHALL update transaction state to committed
+* *AND* it SHALL NOT re-enable autocommit on the server
 
 ### Scenario: Transaction rollback
 
-* *GIVEN* a transaction is in progress
+* *GIVEN* autocommit is disabled on the connection
+* *AND* a transaction is in progress
 * *WHEN* rolling back a transaction
 * *THEN* it SHALL execute ROLLBACK
 * *AND* it SHALL update transaction state to rolled back
+* *AND* it SHALL NOT re-enable autocommit on the server
+
+### Scenario: Commit after rollback with autocommit disabled
+
+* *GIVEN* autocommit is disabled on the connection
+* *AND* a rollback has been performed
+* *WHEN* a commit is called
+* *THEN* the commit SHALL succeed as a no-op
+* *AND* the connection SHALL remain in manual transaction mode
+
+### Scenario: Rollback without active transaction
+
+* *GIVEN* autocommit is disabled on the connection
+* *AND* no transaction is currently active
+* *WHEN* a rollback is called
+* *THEN* the rollback SHALL succeed as a no-op
+* *AND* the connection SHALL remain in manual transaction mode
 
 ### Scenario: Auto-commit mode
 
