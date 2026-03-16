@@ -4,7 +4,7 @@ Specifies type-specific conversion logic from Exasol JSON responses to Arrow arr
 
 ## Background
 
-Exasol returns JSON result data with typed columns. All conversions SHALL produce appropriate Arrow array types with correct precision, encoding, and overflow detection. Numeric conversions SHALL detect out-of-range values. String conversions SHALL validate UTF-8 encoding. Temporal conversions SHALL handle Exasol date, timestamp, and interval formats. Binary conversions SHALL decode Base64 and hexadecimal encodings.
+Exasol returns JSON result data with typed columns. All conversions SHALL produce appropriate Arrow array types with correct precision, encoding, and overflow detection. Numeric conversions SHALL detect out-of-range values. String conversions SHALL validate UTF-8 encoding. Temporal conversions SHALL handle Exasol date, timestamp, and interval formats. Binary conversions SHALL decode Base64 and hexadecimal encodings. The Exasol WebSocket API defines `TIMESTAMP WITH LOCAL TIME ZONE` as a distinct type name separate from `TIMESTAMP`.
 
 ## Scenarios
 
@@ -111,3 +111,10 @@ Exasol returns JSON result data with typed columns. All conversions SHALL produc
 * *WHEN* building Arrow binary arrays
 * *THEN* it SHALL handle variable-length binary data correctly
 * *AND* it SHALL use appropriate offset types
+
+### Scenario: TIMESTAMP WITH LOCAL TIME ZONE type parsing in WebSocket path
+
+* *GIVEN* a query result includes a column of type `TIMESTAMP WITH LOCAL TIME ZONE`
+* *WHEN* the WebSocket response contains `type: "TIMESTAMP WITH LOCAL TIME ZONE"` in the column metadata
+* *THEN* the converter SHALL parse this as a valid TIMESTAMP type with `with_local_time_zone: true`
+* *AND* the converter SHALL NOT return an "Unsupported Exasol type" error
