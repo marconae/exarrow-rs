@@ -292,6 +292,9 @@ impl ResultSet {
             "TIMESTAMP" => ExasolType::Timestamp {
                 with_local_time_zone: data_type.with_local_time_zone.unwrap_or(false),
             },
+            "TIMESTAMP WITH LOCAL TIME ZONE" => ExasolType::Timestamp {
+                with_local_time_zone: true,
+            },
             "INTERVAL YEAR TO MONTH" => ExasolType::IntervalYearToMonth,
             "INTERVAL DAY TO SECOND" => ExasolType::IntervalDayToSecond {
                 precision: data_type.fraction.unwrap_or(3) as u8,
@@ -462,13 +465,12 @@ impl ResultSet {
                     }
                     Arc::new(builder.finish())
                 }
-                DataType::Timestamp(_, _) => {
+                DataType::Timestamp(_, tz) => {
                     let mut builder = TimestampMicrosecondBuilder::new();
                     for value in col_values {
                         if value.is_null() {
                             builder.append_null();
                         } else if let Some(s) = value.as_str() {
-                            // Parse timestamp string to microseconds since Unix epoch
                             match Self::parse_timestamp_to_micros(s) {
                                 Ok(micros) => builder.append_value(micros),
                                 Err(_) => builder.append_null(),
@@ -477,7 +479,12 @@ impl ResultSet {
                             builder.append_null();
                         }
                     }
-                    Arc::new(builder.finish())
+                    let array = builder.finish();
+                    if tz.is_some() {
+                        Arc::new(array.with_timezone("UTC"))
+                    } else {
+                        Arc::new(array)
+                    }
                 }
                 _ => {
                     // Fallback to string for unsupported types
@@ -789,6 +796,7 @@ mod tests {
             async fn close_prepared_statement(&mut self, handle: &PreparedStatementHandle) -> Result<(), crate::error::TransportError>;
             async fn close(&mut self) -> Result<(), crate::error::TransportError>;
             fn is_connected(&self) -> bool;
+            async fn set_autocommit(&mut self, enabled: bool) -> Result<(), crate::error::TransportError>;
         }
     }
 

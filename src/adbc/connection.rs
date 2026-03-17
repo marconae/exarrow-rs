@@ -37,15 +37,10 @@ use tokio::time::timeout;
 ///
 pub type Session = Connection;
 
-/// Global tokio runtime for blocking operations.
-///
-/// This runtime is lazily initialized on first use and is shared across
-/// all blocking import/export operations. It provides a way to call
-/// async methods from synchronous code.
 fn blocking_runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("Failed to create tokio runtime for blocking operations")
@@ -525,18 +520,15 @@ impl Connection {
     // Transaction Methods
     // ========================================================================
 
-    /// Begin a transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns `QueryError` if a transaction is already active or if the operation fails.
-    ///
-    /// # Example
-    ///
     pub async fn begin_transaction(&mut self) -> Result<(), QueryError> {
-        // Exasol doesn't have a BEGIN statement - transactions are implicit.
-        // Starting a transaction just means we're tracking that autocommit is off.
-        // The actual transaction begins with the first DML/query.
+        // Disable autocommit on the server so statements don't auto-commit
+        self.transport
+            .lock()
+            .await
+            .set_autocommit(false)
+            .await
+            .map_err(|e| QueryError::TransactionError(e.to_string()))?;
+
         self.session
             .begin_transaction()
             .await
@@ -545,16 +537,11 @@ impl Connection {
         Ok(())
     }
 
-    /// Commit the current transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns `QueryError` if no transaction is active or if the operation fails.
-    ///
-    /// # Example
-    ///
     pub async fn commit(&mut self) -> Result<(), QueryError> {
-        // Execute COMMIT statement
+        if !self.in_transaction() {
+            return Ok(());
+        }
+
         self.execute_update("COMMIT").await?;
 
         self.session
@@ -565,16 +552,11 @@ impl Connection {
         Ok(())
     }
 
-    /// Rollback the current transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns `QueryError` if no transaction is active or if the operation fails.
-    ///
-    /// # Example
-    ///
     pub async fn rollback(&mut self) -> Result<(), QueryError> {
-        // Execute ROLLBACK statement
+        if !self.in_transaction() {
+            return Ok(());
+        }
+
         self.execute_update("ROLLBACK").await?;
 
         self.session
@@ -691,26 +673,21 @@ impl Connection {
         schema: Option<&str>,
         table: Option<&str>,
     ) -> Result<ResultSet, QueryError> {
-        let mut conditions = Vec::new();
+        let mut conditions = vec!["OBJECT_TYPE IN ('TABLE', 'VIEW')".to_string()];
 
-        if let Some(cat) = catalog {
-            conditions.push(format!("TABLE_SCHEMA = '{}'", cat.replace('\'', "''")));
-        }
+        // Exasol has no catalogs — ignore the catalog parameter
+        let _ = catalog;
         if let Some(sch) = schema {
-            conditions.push(format!("TABLE_SCHEMA = '{}'", sch.replace('\'', "''")));
+            conditions.push(format!("ROOT_NAME = '{}'", sch.replace('\'', "''")));
         }
         if let Some(tbl) = table {
-            conditions.push(format!("TABLE_NAME = '{}'", tbl.replace('\'', "''")));
+            conditions.push(format!("OBJECT_NAME = '{}'", tbl.replace('\'', "''")));
         }
 
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
         let sql = format!(
-            "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM SYS.EXA_ALL_TABLES {} ORDER BY TABLE_SCHEMA, TABLE_NAME",
+            "SELECT ROOT_NAME AS TABLE_SCHEMA, OBJECT_NAME AS TABLE_NAME, OBJECT_TYPE AS TABLE_TYPE FROM SYS.EXA_ALL_OBJECTS {} ORDER BY ROOT_NAME, OBJECT_NAME",
             where_clause
         );
 
@@ -816,6 +793,27 @@ impl Connection {
         self.session.close().await?;
 
         // Close transport
+        let mut transport = self.transport.lock().await;
+        transport
+            .close()
+            .await
+            .map_err(|e| ConnectionError::ConnectionFailed {
+                host: self.params.host.clone(),
+                port: self.params.port,
+                message: e.to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    /// Shut down the connection without consuming self.
+    ///
+    /// Unlike `close()`, this can be called through a shared reference,
+    /// making it suitable for use in `Drop` implementations where ownership
+    /// transfer is not possible (e.g., when the connection is behind `Arc<Mutex<>>`).
+    pub async fn shutdown(&self) -> Result<(), ConnectionError> {
+        self.session.close().await?;
+
         let mut transport = self.transport.lock().await;
         transport
             .close()

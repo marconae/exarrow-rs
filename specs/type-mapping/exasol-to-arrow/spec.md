@@ -37,7 +37,7 @@ The system defines a complete mapping from Exasol data types to Apache Arrow dat
 * *WHEN* mapping Exasol temporal types
 * *THEN* DATE SHALL map to Arrow Date32
 * *AND* TIMESTAMP with fractional precision 0-9 SHALL map to Arrow Timestamp with appropriate TimeUnit
-* *AND* TIMESTAMP precision 0-3 SHOULD map to Millisecond, 4-6 to Microsecond, 7-9 to Nanosecond
+* *AND* parameterized TIMESTAMP variants like `TIMESTAMP(3)` SHALL be parsed correctly, ignoring the precision parameter for Arrow mapping
 * *AND* INTERVAL types SHALL map to Arrow Duration or Interval types
 
 ### Scenario: Boolean type mapping

@@ -69,6 +69,6 @@ mod tests {
     #[test]
     fn test_prepared_statement_handle_export() {
         // Verify PreparedStatementHandle is exported and accessible
-        let _handle = PreparedStatementHandle::new(1, 0, vec![]);
+        let _handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
     }
 }

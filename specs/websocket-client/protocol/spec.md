@@ -80,3 +80,11 @@ The system implements the Exasol WebSocket API protocol as defined in https://gi
 * *WHEN* Exasol returns an error response
 * *THEN* it SHALL parse error codes and messages
 * *AND* it SHALL convert them to appropriate Rust error types
+
+### Scenario: Set session attributes command
+
+* *GIVEN* an authenticated WebSocket session exists
+* *WHEN* setting session attributes (e.g., autocommit mode)
+* *THEN* the system SHALL send a `setAttributes` command with the attributes to modify
+* *AND* the system SHALL validate the server response status
+* *AND* the system SHALL return an error if the server rejects the attribute change

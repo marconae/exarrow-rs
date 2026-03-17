@@ -62,3 +62,28 @@ The system implements the ADBC (Arrow Database Connectivity) driver interface to
 * *WHEN* a type conversion fails
 * *THEN* it SHALL return a clear error indicating the problematic type
 * *AND* it SHALL specify which column and row caused the error
+
+### Scenario: Parameterized TIMESTAMP type parsing in FFI layer
+
+* *GIVEN* an active ADBC connection via the FFI driver manager
+* *AND* a table exists with a `TIMESTAMP(3)` column
+* *WHEN* retrieving the table schema via `get_table_schema`
+* *THEN* the driver SHALL parse `TIMESTAMP(3)` as a valid TIMESTAMP type
+* *AND* the driver SHALL NOT return an "Unknown Exasol type" error
+
+### Scenario: Parameterized INTERVAL YEAR TO MONTH type parsing in FFI layer
+
+* *GIVEN* an active ADBC connection via the FFI driver manager
+* *AND* a table exists with an `INTERVAL YEAR(5) TO MONTH` column
+* *WHEN* retrieving the table schema via `get_table_schema`
+* *THEN* the driver SHALL parse `INTERVAL YEAR(2) TO MONTH` and `INTERVAL YEAR(5) TO MONTH` as valid INTERVAL YEAR TO MONTH types
+* *AND* the driver SHALL NOT return an "Unknown Exasol type" error
+
+### Scenario: Parameterized INTERVAL DAY TO SECOND type parsing in FFI layer
+
+* *GIVEN* an active ADBC connection via the FFI driver manager
+* *AND* a table exists with an `INTERVAL DAY(9) TO SECOND(9)` column
+* *WHEN* retrieving the table schema via `get_table_schema`
+* *THEN* the driver SHALL parse `INTERVAL DAY(2) TO SECOND(3)` and `INTERVAL DAY(9) TO SECOND(9)` as valid INTERVAL DAY TO SECOND types
+* *AND* the driver SHALL extract the seconds fraction precision from the SECOND parameter
+* *AND* the driver SHALL NOT return an "Unknown Exasol type" error

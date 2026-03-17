@@ -26,6 +26,7 @@ use super::messages::{
     CreatePreparedStatementResponse, DisconnectRequest, DisconnectResponse,
     ExecutePreparedStatementRequest, ExecuteRequest, ExecuteResponse, FetchRequest, FetchResponse,
     LoginInitRequest, LoginResponse, PublicKeyResponse, ResultData, ResultSetHandle, SessionInfo,
+    SetAttributesRequest, SetAttributesResponse,
 };
 use super::protocol::{
     ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
@@ -550,21 +551,24 @@ impl TransportProtocol for WebSocketTransport {
             .ok_or_else(|| TransportError::InvalidResponse("Missing response data".to_string()))?;
 
         // Extract parameter types from parameter_data if present
-        let (num_params, parameter_types) = if let Some(param_data) = response_data.parameter_data {
-            let types = param_data
-                .columns
-                .into_iter()
-                .map(|p| p.data_type)
-                .collect();
-            (param_data.num_columns, types)
-        } else {
-            (0, vec![])
-        };
+        let (num_params, parameter_types, parameter_names) =
+            if let Some(param_data) = response_data.parameter_data {
+                let mut types = Vec::with_capacity(param_data.columns.len());
+                let mut names = Vec::with_capacity(param_data.columns.len());
+                for p in param_data.columns {
+                    types.push(p.data_type);
+                    names.push(p.name);
+                }
+                (param_data.num_columns, types, names)
+            } else {
+                (0, vec![], vec![])
+            };
 
         Ok(PreparedStatementHandle::new(
             response_data.statement_handle,
             num_params,
             parameter_types,
+            parameter_names,
         ))
     }
 
@@ -740,6 +744,19 @@ impl TransportProtocol for WebSocketTransport {
             ConnectionState::Connected | ConnectionState::Authenticated
         )
     }
+
+    async fn set_autocommit(&mut self, enabled: bool) -> Result<(), TransportError> {
+        if self.state != ConnectionState::Authenticated {
+            return Err(TransportError::ProtocolError(
+                "Must authenticate before setting attributes".to_string(),
+            ));
+        }
+
+        let request = SetAttributesRequest::autocommit(enabled);
+        let response: SetAttributesResponse = self.send_receive(&request).await?;
+        self.check_status(&response.status, &response.exception)?;
+        Ok(())
+    }
 }
 
 /// A certificate verifier that accepts any certificate.
@@ -894,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_prepared_statement_requires_authenticated_state() {
         let mut transport = WebSocketTransport::new();
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+        let handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
 
         let result = transport.execute_prepared_statement(&handle, None).await;
 
@@ -909,7 +926,7 @@ mod tests {
     #[tokio::test]
     async fn test_close_prepared_statement_requires_authenticated_state() {
         let mut transport = WebSocketTransport::new();
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+        let handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
 
         let result = transport.close_prepared_statement(&handle).await;
 

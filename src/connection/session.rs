@@ -225,10 +225,7 @@ impl Session {
     /// Commit the current transaction.
     pub async fn commit_transaction(&self) -> Result<(), ConnectionError> {
         if !self.in_transaction() {
-            return Err(ConnectionError::InvalidParameter {
-                parameter: "transaction".to_string(),
-                message: "No active transaction".to_string(),
-            });
+            return Ok(());
         }
 
         self.in_transaction.store(false, Ordering::SeqCst);
@@ -241,10 +238,7 @@ impl Session {
     /// Rollback the current transaction.
     pub async fn rollback_transaction(&self) -> Result<(), ConnectionError> {
         if !self.in_transaction() {
-            return Err(ConnectionError::InvalidParameter {
-                parameter: "transaction".to_string(),
-                message: "No active transaction".to_string(),
-            });
+            return Ok(());
         }
 
         self.in_transaction.store(false, Ordering::SeqCst);
@@ -537,6 +531,34 @@ mod tests {
         session.begin_transaction().await.unwrap();
         assert!(session.in_transaction());
 
+        session.rollback_transaction().await.unwrap();
+        assert!(!session.in_transaction());
+        assert_eq!(session.state().await, SessionState::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_commit_without_transaction_is_noop() {
+        let session = Session::new(
+            "sess123".to_string(),
+            mock_server_info(),
+            SessionConfig::default(),
+        );
+
+        assert!(!session.in_transaction());
+        session.commit_transaction().await.unwrap();
+        assert!(!session.in_transaction());
+        assert_eq!(session.state().await, SessionState::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_rollback_without_transaction_is_noop() {
+        let session = Session::new(
+            "sess123".to_string(),
+            mock_server_info(),
+            SessionConfig::default(),
+        );
+
+        assert!(!session.in_transaction());
         session.rollback_transaction().await.unwrap();
         assert!(!session.in_transaction());
         assert_eq!(session.state().await, SessionState::Ready);

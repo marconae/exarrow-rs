@@ -2,12 +2,17 @@
 
 ## Prerequisites
 
-**Before running integration tests or examples**, ask the user to start the Exasol Docker container:
+**Before running integration tests or examples**, start the Exasol Docker container yourself (don't ask the user):
 ```bash
 docker run -d --name exasol-test -p 8563:8563 --privileged exasol/docker-db:latest
 ```
 
 Default credentials: `sys` / `exasol` on `localhost:8563`
+
+**Check Exasol is ready** before running tests:
+```bash
+exapump sql 'select 1'   # Uses default profile; should return "1"
+```
 
 ## Build & Test Commands
 
@@ -66,3 +71,32 @@ Specifications live in `specs/` using a `specs/<domain>/<feature>/spec.md` struc
 - TLS enabled by default; production Exasol requires it
 - Never log or expose connection passwords
 - Integration tests require running Exasol instance
+
+## Driver Manager Tests & FFI
+
+Driver manager tests (`tests/driver_manager_tests.rs`) load `target/release/libexarrow_rs.so` (or `.dylib`) as a **dynamic library** at runtime. This has critical implications:
+
+- **`cargo test` does NOT rebuild the cdylib.** Always run `cargo build --release --features ffi` before driver manager tests, otherwise tests run against a stale `.so`.
+- **The FFI runtime is `multi_thread(2)`** (`src/adbc_ffi.rs`). This is required for import operations that need concurrent WebSocket + HTTP I/O inside `block_on`.
+- **Do not run driver manager tests under `cargo-llvm-cov`.** The coverage instrumentation's atexit handlers conflict with the FFI static runtime, causing hangs.
+- The FFI `OnceLock<Runtime>` is a process-global static inside the `.so` — it persists across all test invocations in the same process.
+
+## CI Pipeline
+
+- **Rust toolchain is pinned to 1.92.0** in `.github/workflows/ci.yml`. Keep CI and local toolchains in sync to avoid formatting drift.
+- **GitHub Actions cache is immutable** — once a cache entry exists for a key based on `Cargo.lock`, it cannot be updated. The integration tests job explicitly rebuilds the release cdylib before driver manager tests to avoid stale artifacts.
+- **`cargo test` captures stdout/stderr by default.** When adding diagnostic `eprintln!` traces for CI debugging, use `--nocapture`. Always verify diagnostic output is visible before adding more instrumentation.
+- Integration tests job has `timeout-minutes: 30` to prevent runaway hangs.
+
+## Debugging CI Hangs
+
+When a CI test hangs:
+1. **Verify your fix takes effect first** — if the test loads a dynamic library, confirm the library is rebuilt with your changes (not served from cache).
+2. **Add ONE minimal trace and confirm it appears** in the CI log before adding elaborate instrumentation. Remember `--nocapture`.
+3. **Don't trust a root cause analysis blindly** — verify the hypothesis by observing the actual behavior change. If 2 iterations of a fix don't work, the RCA is likely wrong; investigate from scratch.
+
+## Changelog
+
+- `CHANGELOG.md` must be updated with every version bump
+- Format: `## <version>` header followed by bullet points describing changes
+- Entries should be concise, user-facing descriptions (not internal implementation details)

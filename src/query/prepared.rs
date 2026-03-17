@@ -222,6 +222,7 @@ mod tests {
                     fraction: None,
                 },
             ],
+            vec![],
         );
 
         let stmt = PreparedStatement::new(handle);
@@ -234,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_bind_valid() {
-        let handle = PreparedStatementHandle::new(1, 2, vec![]);
+        let handle = PreparedStatementHandle::new(1, 2, vec![], vec![]);
         let mut stmt = PreparedStatement::new(handle);
 
         assert!(stmt.bind(0, 42).is_ok());
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_bind_out_of_bounds() {
-        let handle = PreparedStatementHandle::new(1, 2, vec![]);
+        let handle = PreparedStatementHandle::new(1, 2, vec![], vec![]);
         let mut stmt = PreparedStatement::new(handle);
 
         let result = stmt.bind(5, 42);
@@ -256,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_clear_parameters() {
-        let handle = PreparedStatementHandle::new(1, 2, vec![]);
+        let handle = PreparedStatementHandle::new(1, 2, vec![], vec![]);
         let mut stmt = PreparedStatement::new(handle);
 
         stmt.bind(0, 42).unwrap();
@@ -271,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_build_params_unbound() {
-        let handle = PreparedStatementHandle::new(1, 2, vec![]);
+        let handle = PreparedStatementHandle::new(1, 2, vec![], vec![]);
         let stmt = PreparedStatement::new(handle);
 
         let result = stmt.build_parameters_data();
@@ -284,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_build_params_success() {
-        let handle = PreparedStatementHandle::new(1, 2, vec![]);
+        let handle = PreparedStatementHandle::new(1, 2, vec![], vec![]);
         let mut stmt = PreparedStatement::new(handle);
 
         stmt.bind(0, 42).unwrap();
@@ -301,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_no_params() {
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+        let handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
         let stmt = PreparedStatement::new(handle);
 
         assert_eq!(stmt.parameter_count(), 0);

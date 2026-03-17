@@ -314,7 +314,7 @@ fn parse_date_to_days(date_str: &str, row: usize, column: usize) -> Result<i32, 
 
 fn build_timestamp_array(
     values: &[&Value],
-    _with_local_time_zone: bool,
+    with_local_time_zone: bool,
     column: usize,
 ) -> Result<ArrayRef, ConversionError> {
     let mut builder = TimestampMicrosecondBuilder::with_capacity(values.len());
@@ -335,7 +335,12 @@ fn build_timestamp_array(
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    let array = builder.finish();
+    if with_local_time_zone {
+        Ok(Arc::new(array.with_timezone("UTC")))
+    } else {
+        Ok(Arc::new(array))
+    }
 }
 
 /// Parse a timestamp string to microseconds since Unix epoch.

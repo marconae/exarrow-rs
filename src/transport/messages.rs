@@ -577,6 +577,9 @@ impl CreatePreparedStatementRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterInfo {
+    /// Parameter name (provided by Exasol in prepared statement metadata)
+    #[serde(default)]
+    pub name: Option<String>,
     /// Data type of the parameter
     pub data_type: DataType,
 }
@@ -754,6 +757,43 @@ impl Default for DisconnectRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisconnectResponse {
+    /// Status of the response
+    pub status: String,
+    /// Exception information if failed
+    pub exception: Option<ExceptionInfo>,
+}
+
+/// Set attributes request (e.g., to toggle autocommit mid-session).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAttributesRequest {
+    /// Command name
+    pub command: String,
+    /// Attributes to set
+    pub attributes: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl SetAttributesRequest {
+    /// Create a new set attributes request.
+    pub fn new(attributes: std::collections::HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            command: "setAttributes".to_string(),
+            attributes,
+        }
+    }
+
+    /// Create a request to set the autocommit attribute.
+    pub fn autocommit(enabled: bool) -> Self {
+        let mut attributes = std::collections::HashMap::new();
+        attributes.insert("autocommit".to_string(), serde_json::Value::Bool(enabled));
+        Self::new(attributes)
+    }
+}
+
+/// Set attributes response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAttributesResponse {
     /// Status of the response
     pub status: String,
     /// Exception information if failed
