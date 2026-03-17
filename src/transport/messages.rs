@@ -577,6 +577,9 @@ impl CreatePreparedStatementRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParameterInfo {
+    /// Parameter name (provided by Exasol in prepared statement metadata)
+    #[serde(default)]
+    pub name: Option<String>,
     /// Data type of the parameter
     pub data_type: DataType,
 }

@@ -101,15 +101,23 @@ pub struct PreparedStatementHandle {
     pub num_params: i32,
     /// Parameter type information (if available)
     pub parameter_types: Vec<DataType>,
+    /// Parameter names from Exasol metadata (if available)
+    pub parameter_names: Vec<Option<String>>,
 }
 
 impl PreparedStatementHandle {
     /// Create a new prepared statement handle.
-    pub fn new(handle: i32, num_params: i32, parameter_types: Vec<DataType>) -> Self {
+    pub fn new(
+        handle: i32,
+        num_params: i32,
+        parameter_types: Vec<DataType>,
+        parameter_names: Vec<Option<String>>,
+    ) -> Self {
         Self {
             handle,
             num_params,
             parameter_types,
+            parameter_names,
         }
     }
 }
@@ -430,7 +438,7 @@ mod tests {
             },
         ];
 
-        let handle = PreparedStatementHandle::new(42, 2, param_types);
+        let handle = PreparedStatementHandle::new(42, 2, param_types, vec![]);
         assert_eq!(handle.handle, 42);
         assert_eq!(handle.num_params, 2);
         assert_eq!(handle.parameter_types.len(), 2);
@@ -440,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement_handle_no_params() {
-        let handle = PreparedStatementHandle::new(1, 0, vec![]);
+        let handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
         assert_eq!(handle.handle, 1);
         assert_eq!(handle.num_params, 0);
         assert!(handle.parameter_types.is_empty());

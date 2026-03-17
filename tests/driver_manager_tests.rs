@@ -2454,3 +2454,370 @@ fn test_query_timestamp_with_local_time_zone() {
         let _ = stmt.execute_update();
     }
 }
+
+// ADBC Compliance Tests
+
+#[test]
+fn test_bind_execute_update() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    setup_driver_manager_conn!(_driver, _db, conn);
+
+    let schema_name = format!(
+        "TEST_BIND_EXEC_UPD_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Create schema and table
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.BIND_TABLE (id INTEGER, name VARCHAR(100))",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Prepare INSERT, bind a RecordBatch, and execute_update
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "INSERT INTO {}.BIND_TABLE (id, name) VALUES (?, ?)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.prepare().unwrap();
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Int32Array::from(vec![10, 20, 30])),
+                Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"])),
+            ],
+        )
+        .unwrap();
+
+        stmt.bind(batch).unwrap();
+        let result = stmt.execute_update();
+        assert!(
+            result.is_ok(),
+            "Bind + execute_update should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    // Verify inserted rows
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "SELECT id, name FROM {}.BIND_TABLE ORDER BY id",
+            schema_name
+        ))
+        .unwrap();
+        let mut reader = stmt.execute().unwrap();
+
+        let mut all_ids = Vec::new();
+        let mut all_names = Vec::new();
+        for batch_result in reader.by_ref() {
+            let batch = batch_result.expect("Failed to read batch");
+            let id_col = batch.column(0);
+            let name_col = batch.column(1);
+
+            if let Some(arr) = id_col
+                .as_any()
+                .downcast_ref::<arrow::array::Decimal128Array>()
+            {
+                for i in 0..arr.len() {
+                    all_ids.push(arr.value(i) as i64);
+                }
+            } else if let Some(arr) = id_col.as_any().downcast_ref::<Int32Array>() {
+                for i in 0..arr.len() {
+                    all_ids.push(arr.value(i) as i64);
+                }
+            } else if let Some(arr) = id_col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+                for i in 0..arr.len() {
+                    all_ids.push(arr.value(i));
+                }
+            }
+
+            if let Some(arr) = name_col.as_any().downcast_ref::<StringArray>() {
+                for i in 0..arr.len() {
+                    all_names.push(arr.value(i).to_string());
+                }
+            }
+        }
+
+        assert_eq!(
+            all_ids,
+            vec![10, 20, 30],
+            "IDs should match inserted values"
+        );
+        assert_eq!(
+            all_names,
+            vec!["alpha", "beta", "gamma"],
+            "Names should match inserted values"
+        );
+    }
+
+    // Cleanup
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        let _ = stmt.execute_update();
+    }
+}
+
+#[test]
+fn test_bind_execute_query() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    setup_driver_manager_conn!(_driver, _db, conn);
+
+    let schema_name = format!(
+        "TEST_BIND_EXEC_QRY_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.QUERY_TABLE (id INTEGER, val INTEGER)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "INSERT INTO {}.QUERY_TABLE VALUES (1, 100), (2, 200), (3, 300)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "SELECT val FROM {}.QUERY_TABLE WHERE id = ?",
+            schema_name
+        ))
+        .unwrap();
+        stmt.prepare().unwrap();
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "param",
+                DataType::Int32,
+                false,
+            )])),
+            vec![Arc::new(Int32Array::from(vec![2]))],
+        )
+        .unwrap();
+
+        stmt.bind(batch).unwrap();
+        let mut reader = stmt.execute().expect("Bind + execute should succeed");
+
+        let mut results = Vec::new();
+        for batch_result in reader.by_ref() {
+            let batch = batch_result.expect("Failed to read batch");
+            let col = batch.column(0);
+
+            if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Decimal128Array>() {
+                for i in 0..arr.len() {
+                    let scale = arr.scale() as u32;
+                    results.push(arr.value(i) / 10i128.pow(scale));
+                }
+            } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+                for i in 0..arr.len() {
+                    results.push(arr.value(i) as i128);
+                }
+            } else if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
+                for i in 0..arr.len() {
+                    results.push(arr.value(i) as i128);
+                }
+            }
+        }
+
+        assert_eq!(results, vec![200], "Should return val=200 for id=2");
+    }
+
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+}
+
+#[test]
+fn test_get_current_catalog() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    setup_driver_manager_conn!(_driver, _db, conn);
+
+    let catalog = conn
+        .get_option_string(OptionConnection::CurrentCatalog)
+        .expect("get_option_string(CurrentCatalog) should succeed");
+
+    assert_eq!(catalog, "EXA", "CurrentCatalog should be EXA");
+}
+
+#[test]
+fn test_parameter_schema_names() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    setup_driver_manager_conn!(_driver, _db, conn);
+
+    let mut stmt = conn.new_statement().expect("Failed to create statement");
+    stmt.set_sql_query("SELECT 1 + ?").unwrap();
+    stmt.prepare().unwrap();
+
+    let param_schema = stmt
+        .get_parameter_schema()
+        .expect("get_parameter_schema should succeed");
+
+    assert_eq!(
+        param_schema.fields().len(),
+        1,
+        "Should have exactly 1 parameter"
+    );
+
+    let field = &param_schema.fields()[0];
+
+    // The field name should be the Exasol-provided name, not "param_0"
+    assert_ne!(
+        field.name(),
+        "param_0",
+        "Parameter name should not be the generic param_0"
+    );
+
+    // Exasol reports a type for the parameter (may be string or numeric depending on context)
+    assert!(
+        !field.data_type().is_null(),
+        "Parameter type should be a valid type"
+    );
+}
+
+#[test]
+fn test_autocommit_toggle_with_dml() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    setup_driver_manager_conn!(_driver, _db, conn);
+
+    let schema_name = format!(
+        "TEST_AC_DML_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+
+    // Create schema and table with autocommit on (default)
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().unwrap();
+    }
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.AC_TABLE (id INTEGER, val VARCHAR(50))",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Disable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "false".into())
+        .unwrap();
+    let ac = conn
+        .get_option_string(OptionConnection::AutoCommit)
+        .unwrap();
+    assert_eq!(ac, "false", "AutoCommit should be false after toggle");
+
+    // Insert data within the transaction
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "INSERT INTO {}.AC_TABLE VALUES (1, 'committed_row')",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().unwrap();
+    }
+
+    // Commit the transaction
+    conn.commit().unwrap();
+
+    // Re-enable autocommit
+    conn.set_option(OptionConnection::AutoCommit, "true".into())
+        .unwrap();
+    let ac = conn
+        .get_option_string(OptionConnection::AutoCommit)
+        .unwrap();
+    assert_eq!(ac, "true", "AutoCommit should be true after re-enable");
+
+    // Verify committed data persists after autocommit re-enabled
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "SELECT val FROM {}.AC_TABLE WHERE id = 1",
+            schema_name
+        ))
+        .unwrap();
+        let mut reader = stmt.execute().unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1, "Committed row should persist");
+
+        let val_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("val column should be StringArray");
+        assert_eq!(
+            val_col.value(0),
+            "committed_row",
+            "Data should match what was inserted"
+        );
+    }
+
+    // Cleanup
+    {
+        let mut stmt = conn.new_statement().expect("Failed to create statement");
+        stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+            .unwrap();
+        let _ = stmt.execute_update();
+    }
+}

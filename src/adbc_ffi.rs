@@ -75,8 +75,9 @@ use tokio::sync::Mutex;
 
 use crate::adbc::Connection as ExaConnection;
 use crate::error::{ExasolError, QueryError};
+use crate::query::prepared::PreparedStatement;
+use crate::query::Parameter;
 use crate::transport::messages::DataType as TransportDataType;
-use crate::transport::protocol::PreparedStatementHandle;
 use crate::types::{ExasolType, TypeMapper};
 
 /// Global tokio runtime for async-to-sync bridging.
@@ -803,27 +804,25 @@ impl Optionable for FfiConnection {
                     let old_auto_commit = self.auto_commit;
                     self.auto_commit = new_auto_commit;
 
-                    if self.inner.is_some() {
-                        if old_auto_commit && !new_auto_commit {
-                            let conn_arc = self.ensure_connected()?;
-                            get_runtime()
-                                .block_on(async {
-                                    let mut conn = conn_arc.lock().await;
-                                    conn.begin_transaction().await
-                                })
-                                .map_err(to_adbc_error)?;
-                        } else if !old_auto_commit && new_auto_commit {
-                            let conn_arc = self.ensure_connected()?;
-                            get_runtime()
-                                .block_on(async {
-                                    let mut conn = conn_arc.lock().await;
-                                    if conn.in_transaction() {
-                                        conn.commit().await?;
-                                    }
-                                    Ok::<(), QueryError>(())
-                                })
-                                .map_err(to_adbc_error)?;
-                        }
+                    if old_auto_commit && !new_auto_commit {
+                        let conn_arc = self.ensure_connected()?;
+                        get_runtime()
+                            .block_on(async {
+                                let mut conn = conn_arc.lock().await;
+                                conn.begin_transaction().await
+                            })
+                            .map_err(to_adbc_error)?;
+                    } else if !old_auto_commit && new_auto_commit {
+                        let conn_arc = self.ensure_connected()?;
+                        get_runtime()
+                            .block_on(async {
+                                let mut conn = conn_arc.lock().await;
+                                if conn.in_transaction() {
+                                    conn.commit().await?;
+                                }
+                                Ok::<(), QueryError>(())
+                            })
+                            .map_err(to_adbc_error)?;
                     }
                 } else {
                     return Err(AdbcError::with_message_and_status(
@@ -872,6 +871,7 @@ impl Optionable for FfiConnection {
             OptionConnection::AutoCommit => {
                 Ok(if self.auto_commit { "true" } else { "false" }.to_string())
             }
+            OptionConnection::CurrentCatalog => Ok("EXA".to_string()),
             OptionConnection::CurrentSchema => self.current_schema.clone().ok_or_else(|| {
                 AdbcError::with_message_and_status("CurrentSchema not set", AdbcStatus::NotFound)
             }),
@@ -1622,6 +1622,186 @@ impl adbc_core::Connection for FfiConnection {
 }
 
 // -----------------------------------------------------------------------------
+// Arrow-to-Parameter Conversion
+// -----------------------------------------------------------------------------
+
+/// Extract a value from an Arrow array at a given row index and convert it to
+/// a `Parameter` enum suitable for Exasol prepared statement binding.
+///
+/// Returns `Parameter::Null` for null values. Handles all Arrow types that map
+/// to Exasol types: Int16/32/64, Float32/64, Utf8/LargeUtf8, Binary/LargeBinary,
+/// Boolean, Date32, Timestamp (all units), and Decimal128.
+fn arrow_value_to_parameter(array: &dyn Array, row: usize) -> AdbcResult<Parameter> {
+    use arrow::array::{
+        BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array,
+        Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, StringArray,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray,
+    };
+    use arrow::datatypes::DataType;
+
+    if array.is_null(row) {
+        return Ok(Parameter::Null);
+    }
+
+    let dt = array.data_type();
+    match dt {
+        DataType::Boolean => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("boolean downcast");
+            Ok(Parameter::Boolean(arr.value(row)))
+        }
+        DataType::Int16 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .expect("int16 downcast");
+            Ok(Parameter::Integer(arr.value(row) as i64))
+        }
+        DataType::Int32 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("int32 downcast");
+            Ok(Parameter::Integer(arr.value(row) as i64))
+        }
+        DataType::Int64 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int64 downcast");
+            Ok(Parameter::Integer(arr.value(row)))
+        }
+        DataType::Float32 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .expect("float32 downcast");
+            Ok(Parameter::Float(arr.value(row) as f64))
+        }
+        DataType::Float64 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("float64 downcast");
+            Ok(Parameter::Float(arr.value(row)))
+        }
+        DataType::Utf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("utf8 downcast");
+            Ok(Parameter::String(arr.value(row).to_string()))
+        }
+        DataType::LargeUtf8 => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("large utf8 downcast");
+            Ok(Parameter::String(arr.value(row).to_string()))
+        }
+        DataType::Binary => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("binary downcast");
+            Ok(Parameter::Binary(arr.value(row).to_vec()))
+        }
+        DataType::LargeBinary => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("large binary downcast");
+            Ok(Parameter::Binary(arr.value(row).to_vec()))
+        }
+        DataType::Date32 => {
+            // Date32 stores days since Unix epoch. Convert to "YYYY-MM-DD" string.
+            let arr = array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .expect("date32 downcast");
+            let days = arr.value(row);
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let date = epoch + chrono::Duration::days(days as i64);
+            Ok(Parameter::String(date.format("%Y-%m-%d").to_string()))
+        }
+        DataType::Timestamp(unit, _tz) => {
+            // Convert timestamp to ISO 8601 string for Exasol
+            let nanos = match unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampSecondArray>()
+                        .expect("timestamp_s downcast");
+                    arr.value(row) * 1_000_000_000
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .expect("timestamp_ms downcast");
+                    arr.value(row) * 1_000_000
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .expect("timestamp_us downcast");
+                    arr.value(row) * 1_000
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    let arr = array
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .expect("timestamp_ns downcast");
+                    arr.value(row)
+                }
+            };
+            let secs = nanos.div_euclid(1_000_000_000);
+            let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
+            let dt = chrono::DateTime::from_timestamp(secs, subsec_nanos).ok_or_else(|| {
+                AdbcError::with_message_and_status(
+                    format!("Invalid timestamp value: {nanos} nanos"),
+                    AdbcStatus::InvalidArguments,
+                )
+            })?;
+            Ok(Parameter::String(
+                dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+            ))
+        }
+        DataType::Decimal128(_precision, scale) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .expect("decimal128 downcast");
+            let raw = arr.value(row);
+            // Format decimal with proper scale
+            if *scale <= 0 {
+                Ok(Parameter::String(raw.to_string()))
+            } else {
+                let scale_u = *scale as u32;
+                let divisor = 10_i128.pow(scale_u);
+                let whole = raw / divisor;
+                let frac = (raw % divisor).unsigned_abs();
+                Ok(Parameter::String(format!(
+                    "{}{}.{:0>width$}",
+                    if raw < 0 && whole == 0 { "-" } else { "" },
+                    whole,
+                    frac,
+                    width = scale_u as usize
+                )))
+            }
+        }
+        other => Err(AdbcError::with_message_and_status(
+            format!("Unsupported Arrow type for parameter binding: {other}"),
+            AdbcStatus::NotImplemented,
+        )),
+    }
+}
+
+// -----------------------------------------------------------------------------
 // FFI Statement
 // -----------------------------------------------------------------------------
 
@@ -1642,8 +1822,8 @@ pub struct FfiStatement {
     bound_data: Option<RecordBatch>,
     /// Statement options
     options: std::collections::HashMap<String, OptionValue>,
-    /// Prepared statement handle with parameter metadata
-    prepared: Option<PreparedStatementHandle>,
+    /// Prepared statement with parameter metadata and bindings
+    prepared: Option<PreparedStatement>,
     /// Autocommit state inherited from parent connection
     auto_commit: bool,
 }
@@ -1915,6 +2095,57 @@ impl adbc_core::Statement for FfiStatement {
             AdbcError::with_message_and_status("SQL query not set", AdbcStatus::InvalidState)
         })?;
 
+        if let Some(batch) = self.bound_data.take() {
+            if self.prepared.is_none() {
+                self.prepare()?;
+            }
+
+            let prepared = self.prepared.as_mut().ok_or_else(|| {
+                AdbcError::with_message_and_status(
+                    "Failed to prepare statement",
+                    AdbcStatus::InvalidState,
+                )
+            })?;
+
+            let conn_arc = self.conn.as_ref().ok_or_else(|| {
+                AdbcError::with_message_and_status(
+                    "No connection available",
+                    AdbcStatus::InvalidState,
+                )
+            })?;
+            let conn_arc = Arc::clone(conn_arc);
+
+            let num_rows = batch.num_rows();
+            let mut all_batches: Vec<RecordBatch> = Vec::new();
+
+            for row_idx in 0..num_rows {
+                for col_idx in 0..batch.num_columns() {
+                    let array = batch.column(col_idx);
+                    let param = arrow_value_to_parameter(array.as_ref(), row_idx)?;
+                    prepared.bind(col_idx, param).map_err(to_adbc_error)?;
+                }
+
+                let batches = get_runtime()
+                    .block_on(async {
+                        let mut conn = conn_arc.lock().await;
+                        let result_set = conn.execute_prepared(prepared).await?;
+                        result_set.fetch_all().await
+                    })
+                    .map_err(to_adbc_error)?;
+
+                all_batches.extend(batches);
+                prepared.clear_parameters();
+            }
+
+            let schema = if all_batches.is_empty() {
+                Arc::new(Schema::empty())
+            } else {
+                all_batches[0].schema()
+            };
+
+            return Ok(VecRecordBatchReader::new(schema, all_batches));
+        }
+
         let sql = sql.clone();
 
         let batches = if let Some(ref conn_arc) = self.conn {
@@ -1968,6 +2199,50 @@ impl adbc_core::Statement for FfiStatement {
 
         let sql = sql.clone();
 
+        if let Some(batch) = self.bound_data.take() {
+            if self.prepared.is_none() {
+                self.prepare()?;
+            }
+
+            let prepared = self.prepared.as_mut().ok_or_else(|| {
+                AdbcError::with_message_and_status(
+                    "Failed to prepare statement",
+                    AdbcStatus::InvalidState,
+                )
+            })?;
+
+            let conn_arc = self.conn.as_ref().ok_or_else(|| {
+                AdbcError::with_message_and_status(
+                    "No connection available",
+                    AdbcStatus::InvalidState,
+                )
+            })?;
+            let conn_arc = Arc::clone(conn_arc);
+
+            let num_rows = batch.num_rows();
+            let mut total_count: i64 = 0;
+
+            for row_idx in 0..num_rows {
+                for col_idx in 0..batch.num_columns() {
+                    let array = batch.column(col_idx);
+                    let param = arrow_value_to_parameter(array.as_ref(), row_idx)?;
+                    prepared.bind(col_idx, param).map_err(to_adbc_error)?;
+                }
+
+                let count = get_runtime()
+                    .block_on(async {
+                        let mut conn = conn_arc.lock().await;
+                        conn.execute_prepared_update(prepared).await
+                    })
+                    .map_err(to_adbc_error)?;
+
+                total_count += count;
+                prepared.clear_parameters();
+            }
+
+            return Ok(Some(total_count));
+        }
+
         let count = if let Some(ref conn_arc) = self.conn {
             // Reuse the shared connection
             let conn_arc = Arc::clone(conn_arc);
@@ -1995,19 +2270,10 @@ impl adbc_core::Statement for FfiStatement {
     }
 
     fn execute_schema(&mut self) -> AdbcResult<Schema> {
-        // Prepare if not already done
         if self.prepared.is_none() {
             self.prepare()?;
         }
 
-        let prepared = self.prepared.as_ref().ok_or_else(|| {
-            AdbcError::with_message_and_status("Statement not prepared", AdbcStatus::InvalidState)
-        })?;
-
-        // Use the result columns from the prepared statement response
-        // For now, we need to actually execute a describe-style query
-        // The prepared statement handle doesn't directly give us result columns,
-        // so we re-query the connection to get the result set metadata
         let sql = self.sql.as_ref().ok_or_else(|| {
             AdbcError::with_message_and_status("SQL query not set", AdbcStatus::InvalidState)
         })?;
@@ -2017,9 +2283,6 @@ impl adbc_core::Statement for FfiStatement {
         })?;
         let conn_arc = Arc::clone(conn_arc);
         let sql = sql.clone();
-        let _handle = prepared.handle;
-
-        // Execute to get schema - we need to query and just extract the schema
         let batches = get_runtime()
             .block_on(async {
                 let mut conn = conn_arc.lock().await;
@@ -2052,12 +2315,19 @@ impl adbc_core::Statement for FfiStatement {
         })?;
 
         let mut fields = Vec::new();
-        for (i, param_type) in prepared.parameter_types.iter().enumerate() {
+        let handle_ref = prepared.handle_ref();
+        for (i, param_type) in handle_ref.parameter_types.iter().enumerate() {
             let exasol_type = transport_datatype_to_exasol(param_type)?;
             let arrow_type = TypeMapper::exasol_to_arrow(&exasol_type, true).map_err(|e| {
                 AdbcError::with_message_and_status(e.to_string(), AdbcStatus::Internal)
             })?;
-            fields.push(Field::new(format!("param_{}", i), arrow_type, true));
+            let name = handle_ref
+                .parameter_names
+                .get(i)
+                .and_then(|n| n.as_deref())
+                .map(String::from)
+                .unwrap_or_else(|| format!("param_{}", i));
+            fields.push(Field::new(name, arrow_type, true));
         }
 
         Ok(Schema::new(fields))
@@ -2081,12 +2351,7 @@ impl adbc_core::Statement for FfiStatement {
             })
             .map_err(to_adbc_error)?;
 
-        // Store the handle metadata (parameter types, num_params)
-        self.prepared = Some(PreparedStatementHandle::new(
-            prepared_stmt.handle(),
-            prepared_stmt.parameter_count() as i32,
-            prepared_stmt.parameter_types().to_vec(),
-        ));
+        self.prepared = Some(prepared_stmt);
 
         Ok(())
     }
