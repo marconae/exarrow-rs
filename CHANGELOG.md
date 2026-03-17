@@ -5,8 +5,13 @@
 - ADBC bulk ingestion support (create, append, replace, create-append modes) via `IngestTargetTable` and `IngestMode` statement options
 - `GetObjects` implementation returning catalog/schema/table/column metadata at configurable depth
 - `GetTableSchema` for retrieving Arrow schema of existing Exasol tables
-- `GetParameterSchema` for retrieving parameter types from prepared statements
+- `GetParameterSchema` for retrieving parameter types from prepared statements with Exasol-provided column names
 - Transaction support with autocommit control, explicit `commit()` and `rollback()`
+- FFI parameter binding: `bind()` + `execute_update()`/`execute()` flow with Arrow-to-Parameter conversion
+- `CurrentCatalog` connection option returns "EXA"
+- Fixed autocommit toggle to ensure connection is established before toggling
+- Fixed INTERVAL and TIMESTAMP WITH LOCAL TIME ZONE parsing
+- Fixed TIMESTAMP precision handling for sub-second values
 
 ## 0.6.4
 
