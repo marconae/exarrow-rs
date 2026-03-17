@@ -45,6 +45,8 @@ Exasol supports transactions through the `autocommit` session attribute. When au
 
 * *GIVEN* an ADBC connection with autocommit in any state
 * *WHEN* the `AutoCommit` connection option is changed
-* *THEN* the driver SHALL send a `setAttributes` command to update autocommit on the server
+* *THEN* the driver SHALL ensure the connection is established before applying the change
+* *AND* the driver SHALL send a `setAttributes` command to update autocommit on the server
+* *AND* if switching from auto to manual mode, the driver SHALL begin a transaction
 * *AND* if switching from manual to auto mode and a transaction is active, the driver SHALL commit it first
 * *AND* if switching from manual to auto mode and no transaction is active, the driver SHALL skip the commit

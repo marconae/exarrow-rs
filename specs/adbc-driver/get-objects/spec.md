@@ -14,6 +14,7 @@ Exasol uses a single synthetic catalog named "EXA" since it has no multi-catalog
 * *WHEN* `get_objects` is called with `depth=Catalogs`
 * *THEN* the driver SHALL return an Arrow RecordBatch with a single row
 * *AND* the `catalog_name` field SHALL be "EXA"
+* *AND* the `CurrentCatalog` connection option SHALL return "EXA" via `get_option_string`
 * *AND* the `catalog_db_schemas` field SHALL be null (not populated at this depth)
 
 ### Scenario: GetObjects at db_schemas depth
