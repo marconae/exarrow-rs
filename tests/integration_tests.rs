@@ -1989,3 +1989,102 @@ async fn test_large_result_set_exceeds_default_frame_limit() {
     cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
+
+// Section: Certificate Fingerprint Tests
+
+/// Connects with a wrong fingerprint and verifies the error contains the actual SHA-256 hex
+/// fingerprint (64 hex chars).
+#[tokio::test]
+async fn test_connect_with_wrong_fingerprint_fails() {
+    skip_if_no_exasol!();
+
+    let conn_str = format!(
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=0000000000000000000000000000000000000000000000000000000000000000",
+        common::get_user(),
+        common::get_password(),
+        common::get_host(),
+        common::get_port(),
+    );
+
+    let driver = exarrow_rs::adbc::Driver::new();
+    let database = driver.open(&conn_str).expect("open should succeed");
+    let result = database.connect().await;
+
+    assert!(
+        result.is_err(),
+        "Connection with wrong fingerprint should fail"
+    );
+
+    let err_msg = result.unwrap_err().to_string();
+    // The error message should contain the actual 64-char SHA-256 hex fingerprint
+    let hex_chars: String = err_msg.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    assert!(
+        hex_chars.len() >= 64,
+        "Error message should contain a 64-char SHA-256 hex fingerprint, got: {}",
+        err_msg
+    );
+}
+
+/// Connects with a placeholder fingerprint to discover the actual fingerprint, then reconnects
+/// using the actual fingerprint to verify successful pinned connection.
+#[tokio::test]
+async fn test_connect_with_certificate_fingerprint() {
+    skip_if_no_exasol!();
+
+    // Step 1: Connect with a wrong fingerprint to discover the actual fingerprint
+    let conn_str_wrong = format!(
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=placeholder",
+        common::get_user(),
+        common::get_password(),
+        common::get_host(),
+        common::get_port(),
+    );
+
+    let driver = exarrow_rs::adbc::Driver::new();
+    let database = driver.open(&conn_str_wrong).expect("open should succeed");
+    let result = database.connect().await;
+
+    assert!(
+        result.is_err(),
+        "Connection with placeholder fingerprint should fail"
+    );
+
+    let err_msg = result.unwrap_err().to_string();
+
+    // Extract the actual fingerprint from the error message ("got <fingerprint>")
+    let actual_fingerprint = err_msg
+        .split("got ")
+        .nth(1)
+        .map(|s| s.trim().to_string())
+        .expect("Error message should contain 'got <fingerprint>'");
+
+    assert_eq!(
+        actual_fingerprint.len(),
+        64,
+        "Actual fingerprint should be 64 hex chars, got: '{}'",
+        actual_fingerprint
+    );
+
+    // Step 2: Reconnect using the discovered fingerprint — should succeed
+    let conn_str_pinned = format!(
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint={}",
+        common::get_user(),
+        common::get_password(),
+        common::get_host(),
+        common::get_port(),
+        actual_fingerprint,
+    );
+
+    let database2 = driver.open(&conn_str_pinned).expect("open should succeed");
+    let conn = database2
+        .connect()
+        .await
+        .expect("Connection with correct fingerprint should succeed");
+
+    assert!(
+        !conn.is_closed().await,
+        "Connection should be open after fingerprint-pinned connect"
+    );
+
+    conn.close().await.expect("Failed to close connection");
+}

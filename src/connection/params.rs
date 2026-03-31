@@ -42,6 +42,9 @@ pub struct ConnectionParams {
     /// TLS certificate validation mode
     pub validate_server_certificate: bool,
 
+    /// Expected SHA-256 hex fingerprint of the server's DER certificate
+    pub certificate_fingerprint: Option<String>,
+
     /// Client name for session identification
     pub client_name: String,
 
@@ -171,6 +174,7 @@ impl fmt::Debug for ConnectionParams {
                 "validate_server_certificate",
                 &self.validate_server_certificate,
             )
+            .field("certificate_fingerprint", &self.certificate_fingerprint)
             .field("client_name", &self.client_name)
             .field("client_version", &self.client_version)
             .field("attributes", &self.attributes)
@@ -201,6 +205,7 @@ pub struct ConnectionBuilder {
     idle_timeout: Option<Duration>,
     use_tls: Option<bool>,
     validate_server_certificate: Option<bool>,
+    certificate_fingerprint: Option<String>,
     client_name: Option<String>,
     client_version: Option<String>,
     attributes: HashMap<String, String>,
@@ -220,6 +225,7 @@ impl ConnectionBuilder {
             idle_timeout: None,
             use_tls: None,
             validate_server_certificate: None,
+            certificate_fingerprint: None,
             client_name: None,
             client_version: None,
             attributes: HashMap::new(),
@@ -283,6 +289,12 @@ impl ConnectionBuilder {
     /// Enable or disable server certificate validation.
     pub fn validate_server_certificate(mut self, validate: bool) -> Self {
         self.validate_server_certificate = Some(validate);
+        self
+    }
+
+    /// Pin TLS connection to a specific certificate fingerprint (SHA-256 hex of DER cert).
+    pub fn certificate_fingerprint(mut self, fingerprint: &str) -> Self {
+        self.certificate_fingerprint = Some(fingerprint.to_string());
         self
     }
 
@@ -368,6 +380,7 @@ impl ConnectionBuilder {
             idle_timeout,
             use_tls: self.use_tls.unwrap_or(false),
             validate_server_certificate: self.validate_server_certificate.unwrap_or(true),
+            certificate_fingerprint: self.certificate_fingerprint,
             client_name: self.client_name.unwrap_or_else(|| "exarrow-rs".to_string()),
             client_version: self
                 .client_version
@@ -524,6 +537,9 @@ fn apply_query_params(
             }
             "client_version" => {
                 builder = builder.client_version(&value);
+            }
+            "certificate_fingerprint" | "certificatefingerprint" => {
+                builder = builder.certificate_fingerprint(&value);
             }
             _ => {
                 // Store as custom attribute
@@ -1203,5 +1219,21 @@ mod tests {
 
         assert_eq!(params.host, "localhost");
         assert_eq!(params.username, "user");
+    }
+
+    #[test]
+    fn test_parse_certificate_fingerprint_param() {
+        let params = "exasol://user:pass@localhost?tls=true&certificate_fingerprint=aabbcc"
+            .parse::<ConnectionParams>()
+            .unwrap();
+        assert_eq!(params.certificate_fingerprint.as_deref(), Some("aabbcc"));
+    }
+
+    #[test]
+    fn test_parse_certificatefingerprint_alias() {
+        let params = "exasol://user:pass@localhost?tls=true&certificatefingerprint=ddeeff"
+            .parse::<ConnectionParams>()
+            .unwrap();
+        assert_eq!(params.certificate_fingerprint.as_deref(), Some("ddeeff"));
     }
 }

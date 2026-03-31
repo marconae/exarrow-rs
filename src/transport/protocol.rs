@@ -20,6 +20,8 @@ pub struct ConnectionParams {
     pub use_tls: bool,
     /// Validate server certificate (default: true)
     pub validate_server_certificate: bool,
+    /// Expected SHA-256 hex fingerprint of the server's DER certificate
+    pub certificate_fingerprint: Option<String>,
     /// Connection timeout in milliseconds
     pub timeout_ms: u64,
 }
@@ -32,6 +34,7 @@ impl ConnectionParams {
             port,
             use_tls: true,
             validate_server_certificate: true,
+            certificate_fingerprint: None,
             timeout_ms: 30_000, // 30 seconds default
         }
     }
@@ -51,6 +54,12 @@ impl ConnectionParams {
     /// with self-signed certificates.
     pub fn with_validate_server_certificate(mut self, validate: bool) -> Self {
         self.validate_server_certificate = validate;
+        self
+    }
+
+    /// Pin TLS connection to a specific certificate fingerprint (SHA-256 hex of DER cert).
+    pub fn with_certificate_fingerprint(mut self, fingerprint: String) -> Self {
+        self.certificate_fingerprint = Some(fingerprint);
         self
     }
 
@@ -83,11 +92,8 @@ impl Credentials {
     }
 }
 
-// Security: Implement Drop to clear password from memory
 impl Drop for Credentials {
     fn drop(&mut self) {
-        // Clear password bytes (basic security measure)
-        // For production, consider using the `zeroize` crate
         self.password.clear();
     }
 }

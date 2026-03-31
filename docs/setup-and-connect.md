@@ -64,6 +64,7 @@ All parameters are set via URL query string (`?key=value&key2=value2`).
 |---|---|---|---|
 | `tls` | `ssl`, `use_tls` | `false` | Enable TLS/SSL encryption |
 | `validate_certificate` | `verify_certificate`, `validateservercertificate` | `true` | Validate the server's TLS certificate |
+| `certificate_fingerprint` | `certificatefingerprint` | — | Pin connection to a specific server certificate (SHA-256 hex of DER cert) |
 | `connection_timeout` | `timeout` | `30` | Connection timeout in seconds (max 300) |
 | `query_timeout` | — | `300` | Query timeout in seconds |
 | `idle_timeout` | — | `600` | Idle connection timeout in seconds |
