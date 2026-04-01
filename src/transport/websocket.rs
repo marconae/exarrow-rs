@@ -299,7 +299,15 @@ impl TransportProtocol for WebSocketTransport {
 
         // Create TLS connector if needed
         let connector = if params.use_tls {
-            let tls_connector = if params.validate_server_certificate {
+            let tls_connector = if let Some(ref fingerprint) = params.certificate_fingerprint {
+                let config = rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(FingerprintVerifier {
+                        expected_fingerprint: fingerprint.clone(),
+                    }))
+                    .with_no_client_auth();
+                Connector::Rustls(Arc::new(config))
+            } else if params.validate_server_certificate {
                 // Use default rustls config with native root certificates
                 let mut root_store = rustls::RootCertStore::empty();
                 let certs = rustls_native_certs::load_native_certs();
@@ -312,7 +320,6 @@ impl TransportProtocol for WebSocketTransport {
                     .with_no_client_auth();
                 Connector::Rustls(Arc::new(config))
             } else {
-                // Disable certificate verification (danger!)
                 let config = rustls::ClientConfig::builder()
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoVerifier))
@@ -759,6 +766,22 @@ impl TransportProtocol for WebSocketTransport {
     }
 }
 
+/// Returns the set of signature schemes supported by the custom certificate verifiers.
+fn all_supported_verify_schemes() -> Vec<rustls::SignatureScheme> {
+    vec![
+        rustls::SignatureScheme::RSA_PKCS1_SHA256,
+        rustls::SignatureScheme::RSA_PKCS1_SHA384,
+        rustls::SignatureScheme::RSA_PKCS1_SHA512,
+        rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+        rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+        rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+        rustls::SignatureScheme::RSA_PSS_SHA256,
+        rustls::SignatureScheme::RSA_PSS_SHA384,
+        rustls::SignatureScheme::RSA_PSS_SHA512,
+        rustls::SignatureScheme::ED25519,
+    ]
+}
+
 /// A certificate verifier that accepts any certificate.
 /// Used when certificate validation is disabled.
 #[derive(Debug)]
@@ -795,18 +818,63 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
+        all_supported_verify_schemes()
+    }
+}
+
+/// A certificate verifier that validates by SHA-256 fingerprint of the DER-encoded certificate.
+/// Bypasses hostname and CA chain validation.
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected_fingerprint: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use aws_lc_rs::digest;
+        let fingerprint = digest::digest(&digest::SHA256, end_entity.as_ref());
+        let actual: String = fingerprint
+            .as_ref()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        if actual == self.expected_fingerprint {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "Certificate fingerprint mismatch: expected {}, got {}",
+                self.expected_fingerprint, actual
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        all_supported_verify_schemes()
     }
 }
 

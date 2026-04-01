@@ -92,10 +92,13 @@ impl Connection {
         let mut transport = WebSocketTransport::new();
 
         // Convert ConnectionParams to TransportConnectionParams
-        let transport_params = TransportConnectionParams::new(params.host.clone(), params.port)
+        let mut transport_params = TransportConnectionParams::new(params.host.clone(), params.port)
             .with_tls(params.use_tls)
             .with_validate_server_certificate(params.validate_server_certificate)
             .with_timeout(params.connection_timeout.as_millis() as u64);
+        if let Some(ref fp) = params.certificate_fingerprint {
+            transport_params = transport_params.with_certificate_fingerprint(fp.clone());
+        }
 
         // Connect
         transport.connect(&transport_params).await.map_err(|e| {

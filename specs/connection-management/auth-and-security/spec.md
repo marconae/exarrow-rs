@@ -14,6 +14,7 @@ Connection parameters are required for Exasol connectivity and SHALL be validate
 * *WHEN* a connection string is provided in the format `exasol://host:port`
 * *THEN* it SHALL parse host and port correctly
 * *AND* it SHALL support optional parameters (schema, encryption settings)
+* *AND* it SHALL parse `certificate_fingerprint` (alias `certificatefingerprint`) as the expected server certificate fingerprint
 
 ### Scenario: Parameter validation
 
@@ -29,6 +30,7 @@ Connection parameters are required for Exasol connectivity and SHALL be validate
 * *WHEN* TLS/SSL is requested
 * *THEN* it SHALL support enabling encrypted connections
 * *AND* it SHALL validate certificate settings if certificate validation is enabled
+* *AND* it SHALL accept an optional certificate fingerprint for pin-based validation
 
 ### Scenario: Username and password authentication
 
@@ -65,3 +67,27 @@ Connection parameters are required for Exasol connectivity and SHALL be validate
 * *WHEN* logging connection events
 * *THEN* it SHALL NOT log passwords or sensitive authentication tokens
 * *AND* it SHALL redact credentials from error messages
+
+### Scenario: Certificate fingerprint validation success
+
+* *GIVEN* a TLS connection is being established
+* *AND* `certificate_fingerprint` is set to the SHA-256 hex fingerprint of the server's certificate
+* *WHEN* the TLS handshake completes
+* *THEN* the driver SHALL compute the SHA-256 hex digest of the server's DER-encoded certificate
+* *AND* it SHALL accept the connection when the fingerprints match
+
+### Scenario: Certificate fingerprint validation failure
+
+* *GIVEN* a TLS connection is being established
+* *AND* `certificate_fingerprint` is set to an incorrect value
+* *WHEN* the TLS handshake completes
+* *THEN* the driver SHALL reject the connection with a certificate fingerprint mismatch error
+* *AND* the error MUST include both the expected fingerprint and the actual server fingerprint
+
+### Scenario: Certificate fingerprint bypasses hostname validation
+
+* *GIVEN* a TLS connection is being established
+* *AND* `certificate_fingerprint` is set
+* *WHEN* the TLS handshake completes
+* *THEN* the driver SHALL skip standard certificate chain and hostname validation
+* *AND* it SHALL rely solely on the fingerprint match for trust

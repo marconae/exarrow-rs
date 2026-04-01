@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Add support for certificate fingerprints
+
 ## 0.7.0
 
 - ADBC bulk ingestion support (create, append, replace, create-append modes) via `IngestTargetTable` and `IngestMode` statement options
