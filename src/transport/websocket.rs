@@ -6,10 +6,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use aws_lc_rs::rsa::{Pkcs1PublicEncryptingKey, PublicEncryptingKey};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use num_bigint::BigUint;
 use rustls::pki_types::CertificateDer;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -149,134 +150,180 @@ impl WebSocketTransport {
     /// Encrypt password using RSA with PKCS#1 v1.5 padding.
     ///
     /// The password is encrypted using the server's public key and then
-    /// base64-encoded for transmission.
+    /// base64-encoded for transmission. Supports RSA key sizes from 1024
+    /// to 8192 bits (Exasol servers may emit 1024-bit keys during login).
     fn encrypt_password(password: &str, public_key_pem: &str) -> Result<String, TransportError> {
-        // Parse PEM to DER (strip headers and base64-decode)
-        let der_bytes = Self::pem_to_der(public_key_pem).map_err(|e| {
+        let pkcs1_der = Self::pem_to_pkcs1_der(public_key_pem).map_err(|e| {
             TransportError::ProtocolError(format!("Failed to parse RSA public key PEM: {}", e))
         })?;
 
-        // Load RSA public key from DER
-        let public_key = PublicEncryptingKey::from_der(&der_bytes).map_err(|e| {
-            TransportError::ProtocolError(format!("Failed to parse RSA public key: {}", e))
+        let (n, e) = Self::parse_rsa_public_key(&pkcs1_der).map_err(|err| {
+            TransportError::ProtocolError(format!("Failed to parse RSA public key: {}", err))
         })?;
 
-        // Create PKCS#1 v1.5 encryptor
-        let pkcs1_key = Pkcs1PublicEncryptingKey::new(public_key).map_err(|e| {
-            TransportError::ProtocolError(format!("Failed to create PKCS1 key: {}", e))
+        let bit_len = n.bits() as usize;
+        if !(1024..=8192).contains(&bit_len) {
+            return Err(TransportError::ProtocolError(format!(
+                "Unsupported RSA key size: {} bits (expected 1024..=8192)",
+                bit_len
+            )));
+        }
+
+        let k = bit_len.div_ceil(8);
+
+        let em = Self::pkcs1_v15_pad(password.as_bytes(), k).map_err(|err| {
+            TransportError::ProtocolError(format!("Failed to pad password: {}", err))
         })?;
 
-        // Encrypt the password
-        let mut ciphertext = vec![0u8; pkcs1_key.ciphertext_size()];
-        let ciphertext = pkcs1_key
-            .encrypt(password.as_bytes(), &mut ciphertext)
-            .map_err(|e| {
-                TransportError::ProtocolError(format!("Failed to encrypt password: {}", e))
-            })?;
+        let m = BigUint::from_bytes_be(&em);
+        let c = m.modpow(&e, &n);
 
-        // Base64-encode the encrypted password
-        Ok(STANDARD.encode(ciphertext))
+        let mut ciphertext = vec![0u8; k];
+        let c_bytes = c.to_bytes_be();
+        ciphertext[k - c_bytes.len()..].copy_from_slice(&c_bytes);
+
+        Ok(STANDARD.encode(&ciphertext))
     }
 
-    /// Convert PKCS#1 PEM to SPKI DER format.
+    /// Strip PEM headers and base64-decode to obtain the raw PKCS#1 DER bytes.
     ///
     /// Exasol sends RSA public keys in PKCS#1 PEM format (`BEGIN RSA PUBLIC KEY`).
-    /// aws-lc-rs expects SPKI (SubjectPublicKeyInfo) DER format, so we:
-    /// 1. Strip PEM headers and base64-decode to get PKCS#1 DER
-    /// 2. Wrap the PKCS#1 DER in SPKI structure
-    fn pem_to_der(pem: &str) -> Result<Vec<u8>, &'static str> {
-        // Find the base64 content between PEM headers
+    /// Returns the raw PKCS#1 RSAPublicKey DER (SEQUENCE { INTEGER n, INTEGER e }).
+    fn pem_to_pkcs1_der(pem: &str) -> Result<Vec<u8>, &'static str> {
         let start_marker = "-----BEGIN RSA PUBLIC KEY-----";
         let end_marker = "-----END RSA PUBLIC KEY-----";
 
         let start = pem.find(start_marker).ok_or("Missing PEM start marker")? + start_marker.len();
         let end = pem.find(end_marker).ok_or("Missing PEM end marker")?;
 
-        // Extract and decode base64 content to get PKCS#1 DER
         let base64_content: String = pem[start..end]
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
 
-        let pkcs1_der = STANDARD
+        STANDARD
             .decode(&base64_content)
-            .map_err(|_| "Invalid base64 in PEM")?;
-
-        // Convert PKCS#1 DER to SPKI DER
-        Ok(Self::pkcs1_to_spki(&pkcs1_der))
+            .map_err(|_| "Invalid base64 in PEM")
     }
 
-    /// Convert PKCS#1 RSAPublicKey DER to SPKI SubjectPublicKeyInfo DER.
+    /// Parse a PKCS#1 RSAPublicKey DER structure into (n, e).
     ///
-    /// SPKI format wraps the PKCS#1 key with an algorithm identifier:
-    /// ```asn1
-    /// SubjectPublicKeyInfo ::= SEQUENCE {
-    ///   algorithm AlgorithmIdentifier,
-    ///   subjectPublicKey BIT STRING
-    /// }
-    /// AlgorithmIdentifier ::= SEQUENCE {
-    ///   algorithm OBJECT IDENTIFIER,  -- 1.2.840.113549.1.1.1 (rsaEncryption)
-    ///   parameters ANY DEFINED BY algorithm OPTIONAL  -- NULL for RSA
-    /// }
-    /// ```
-    fn pkcs1_to_spki(pkcs1_der: &[u8]) -> Vec<u8> {
-        // RSA algorithm identifier: SEQUENCE { OID 1.2.840.113549.1.1.1, NULL }
-        // OID 1.2.840.113549.1.1.1 (rsaEncryption) encoded as:
-        // 06 09 2A 86 48 86 F7 0D 01 01 01 (OID tag, length, value)
-        // 05 00 (NULL tag, zero length)
-        let algorithm_identifier: &[u8] = &[
-            0x30, 0x0D, // SEQUENCE, length 13
-            0x06, 0x09, // OID, length 9
-            0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, // 1.2.840.113549.1.1.1
-            0x05, 0x00, // NULL
-        ];
-
-        // BIT STRING header: tag (0x03) + length + unused bits (0x00)
-        // The bit string contains the PKCS#1 key prefixed with 0x00 (no unused bits)
-        let bit_string_content_len = pkcs1_der.len() + 1; // +1 for the unused bits byte
-
-        // Calculate lengths for DER encoding
-        let bit_string_len = Self::der_length_bytes(bit_string_content_len);
-        let total_content_len =
-            algorithm_identifier.len() + 1 + bit_string_len.len() + bit_string_content_len;
-        let sequence_len = Self::der_length_bytes(total_content_len);
-
-        // Build SPKI DER
-        let mut spki = Vec::with_capacity(1 + sequence_len.len() + total_content_len);
+    /// Reads `SEQUENCE { INTEGER n, INTEGER e }` from the raw DER bytes.
+    fn parse_rsa_public_key(pkcs1_der: &[u8]) -> Result<(BigUint, BigUint), &'static str> {
+        let mut pos = 0;
 
         // Outer SEQUENCE
-        spki.push(0x30); // SEQUENCE tag
-        spki.extend_from_slice(&sequence_len);
+        if pkcs1_der.get(pos) != Some(&0x30) {
+            return Err("Invalid DER: expected SEQUENCE");
+        }
+        pos += 1;
 
-        // Algorithm identifier
-        spki.extend_from_slice(algorithm_identifier);
+        let (seq_len, len_bytes) = Self::read_der_length(&pkcs1_der[pos..])?;
+        pos += len_bytes;
 
-        // BIT STRING containing PKCS#1 key
-        spki.push(0x03); // BIT STRING tag
-        spki.extend_from_slice(&bit_string_len);
-        spki.push(0x00); // No unused bits
-        spki.extend_from_slice(pkcs1_der);
+        let seq_end = pos + seq_len;
+        if seq_end > pkcs1_der.len() {
+            return Err("Invalid DER: truncated");
+        }
 
-        spki
+        // First INTEGER: n (modulus)
+        let (n_bytes, consumed) = Self::read_der_integer(&pkcs1_der[pos..seq_end])?;
+        pos += consumed;
+
+        // Second INTEGER: e (public exponent)
+        let (e_bytes, consumed) = Self::read_der_integer(&pkcs1_der[pos..seq_end])?;
+        pos += consumed;
+
+        if pos != seq_end {
+            return Err("Invalid DER: trailing bytes after SEQUENCE");
+        }
+
+        Ok((
+            BigUint::from_bytes_be(n_bytes),
+            BigUint::from_bytes_be(e_bytes),
+        ))
     }
 
-    /// Encode a length value in DER format.
-    fn der_length_bytes(len: usize) -> Vec<u8> {
-        if len < 128 {
-            vec![len as u8]
-        } else if len < 256 {
-            vec![0x81, len as u8]
-        } else if len < 65536 {
-            vec![0x82, (len >> 8) as u8, (len & 0xFF) as u8]
-        } else {
-            // For very large lengths (unlikely for RSA keys)
-            vec![
-                0x83,
-                (len >> 16) as u8,
-                ((len >> 8) & 0xFF) as u8,
-                (len & 0xFF) as u8,
-            ]
+    /// Read a DER length field, returning (length_value, bytes_consumed).
+    fn read_der_length(data: &[u8]) -> Result<(usize, usize), &'static str> {
+        if data.is_empty() {
+            return Err("Invalid DER: truncated");
         }
+
+        let first = data[0];
+        if first < 0x80 {
+            Ok((first as usize, 1))
+        } else {
+            let num_bytes = (first & 0x7F) as usize;
+            if num_bytes == 0 || num_bytes > 3 {
+                return Err("Invalid DER: truncated");
+            }
+            if data.len() < 1 + num_bytes {
+                return Err("Invalid DER: truncated");
+            }
+            let mut len: usize = 0;
+            for &b in &data[1..1 + num_bytes] {
+                len = (len << 8) | (b as usize);
+            }
+            Ok((len, 1 + num_bytes))
+        }
+    }
+
+    /// Read a DER INTEGER, returning (value_bytes_without_sign_padding, total_bytes_consumed).
+    fn read_der_integer(data: &[u8]) -> Result<(&[u8], usize), &'static str> {
+        if data.is_empty() || data[0] != 0x02 {
+            return Err("Invalid DER: expected INTEGER");
+        }
+
+        let (int_len, len_bytes) = Self::read_der_length(&data[1..])?;
+        let header_len = 1 + len_bytes;
+
+        if data.len() < header_len + int_len {
+            return Err("Invalid DER: truncated");
+        }
+
+        let mut value = &data[header_len..header_len + int_len];
+
+        // Strip leading 0x00 sign-bit padding
+        if value.len() > 1 && value[0] == 0x00 {
+            value = &value[1..];
+        }
+
+        Ok((value, header_len + int_len))
+    }
+
+    /// Build a PKCS#1 v1.5 encryption block: 0x00 || 0x02 || PS || 0x00 || message.
+    ///
+    /// PS consists of random non-zero bytes from `SystemRandom`.
+    fn pkcs1_v15_pad(message: &[u8], k: usize) -> Result<Vec<u8>, &'static str> {
+        if message.len() > k.saturating_sub(11) {
+            return Err("Message too long for RSA modulus");
+        }
+
+        let ps_len = k - message.len() - 3;
+        let rng = SystemRandom::new();
+
+        let mut em = Vec::with_capacity(k);
+        em.push(0x00);
+        em.push(0x02);
+
+        // Fill PS with non-zero random bytes
+        for _ in 0..ps_len {
+            let mut byte = [0u8; 1];
+            loop {
+                rng.fill(&mut byte)
+                    .map_err(|_| "Failed to generate random bytes")?;
+                if byte[0] != 0 {
+                    break;
+                }
+            }
+            em.push(byte[0]);
+        }
+
+        em.push(0x00);
+        em.extend_from_slice(message);
+
+        Ok(em)
     }
 }
 
@@ -1080,6 +1127,21 @@ A74EI7MHQ7163wVPT0VWFRvUmmv+UO7W8wIDAQAB
 
         // RSA 2048-bit encryption produces 256 bytes
         assert_eq!(decoded.unwrap().len(), 256);
+
+        // Additionally verify the new parser accepts this 2048-bit key
+        let der = WebSocketTransport::pem_to_pkcs1_der(test_public_key_pem).unwrap();
+        let (n, e) = WebSocketTransport::parse_rsa_public_key(&der).unwrap();
+        // 2048-bit modulus may report 2040..=2048 bits due to leading-bit nondeterminism
+        assert!(
+            n.bits() > 2040 && n.bits() <= 2048,
+            "Expected ~2048-bit modulus, got {} bits",
+            n.bits()
+        );
+        assert_eq!(
+            e,
+            BigUint::from(65537u32),
+            "Expected standard RSA exponent 65537"
+        );
     }
 
     #[test]
@@ -1094,6 +1156,276 @@ A74EI7MHQ7163wVPT0VWFRvUmmv+UO7W8wIDAQAB
         } else {
             panic!("Expected ProtocolError");
         }
+    }
+
+    #[test]
+    fn test_encrypt_password_with_1024_bit_key() {
+        // Test-only 1024-bit RSA public key (no private key committed). Do not use in production.
+        let pem_1024 = r#"-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBAMh0gXUltxbJYmwQUIvXPLl9Y8bGaGFN/urgclF3Czd7viHaAMuanebQ
+62s1mLV0vXaYSZk8Zsrat2T/i7jbPE0XKpVUgmnlT/CHXv6gPdTpOr3JTpo/lop0
+t6J/6xJBNQDp6OrFMtTTq2M3zxSfcomlT4Q759uuGkEdM9crb8A9AgMBAAE=
+-----END RSA PUBLIC KEY-----"#;
+
+        let result = WebSocketTransport::encrypt_password("hunter2", pem_1024);
+        assert!(
+            result.is_ok(),
+            "encrypt_password with 1024-bit key failed: {:?}",
+            result.err()
+        );
+        let encrypted = result.unwrap();
+
+        // Base64-decode: length MUST equal 128 bytes (1024 bits / 8)
+        let decoded = STANDARD.decode(&encrypted).expect("valid base64");
+        assert_eq!(
+            decoded.len(),
+            128,
+            "1024-bit RSA ciphertext must be 128 bytes, got {}",
+            decoded.len()
+        );
+
+        // Encrypt again with a different password: ciphertexts must differ (random PS padding)
+        let result2 = WebSocketTransport::encrypt_password("different_password", pem_1024);
+        assert!(result2.is_ok());
+        let encrypted2 = result2.unwrap();
+        assert_ne!(
+            encrypted, encrypted2,
+            "Different passwords must produce different ciphertexts"
+        );
+
+        // Even the same password should produce different ciphertext due to random padding
+        let result3 = WebSocketTransport::encrypt_password("hunter2", pem_1024);
+        assert!(result3.is_ok());
+        let encrypted3 = result3.unwrap();
+        assert_ne!(
+            encrypted, encrypted3,
+            "Same password with random padding should produce different ciphertexts"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_password_rejects_too_small_key() {
+        // Test-only 512-bit RSA public key. Do not use in production.
+        let pem_512 = r#"-----BEGIN RSA PUBLIC KEY-----
+MEgCQQCrHBlqjk3p2boRBFTAZdqcWNU+g5LjKicoOX5UIyIanBCV5fgbtoRCCvBr
+++vdlAaIAcJx5iKBMp1obShMOPwVAgMBAAE=
+-----END RSA PUBLIC KEY-----"#;
+
+        let result = WebSocketTransport::encrypt_password("pw", pem_512);
+        assert!(result.is_err(), "512-bit key should be rejected");
+        if let Err(TransportError::ProtocolError(msg)) = result {
+            assert!(
+                msg.contains("Unsupported RSA key size"),
+                "Error should mention unsupported key size, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("512"),
+                "Error should mention 512 bits, got: {}",
+                msg
+            );
+        } else {
+            panic!("Expected ProtocolError");
+        }
+    }
+
+    #[test]
+    fn test_parse_rsa_public_key_roundtrip() {
+        // Use the 2048-bit key from the existing test
+        let test_public_key_pem = r#"-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEAulMKxKfPd02qNEVCU1M6hG/Vc9xz+0u+N47Qqa1Y0E2A5bDiz3XA
+aCg2d65C7DyuTL38zwmOtjagvvIAgRj9yDf0v1/v9e1X4l5XE6UiaKKqdcXNy6lJ
+QspqkOBUptlz+2h/G8Z12++xUo/4AGAGz9ZkrRRvcTGW1GJhCROizeJhTpGMpc/v
+o1G53uy2eTHwnz5S3YgJF7nfX60wjJ99ifQuQ9BhDIYLNqzwHTzExMN63v0UOBIL
+vJ+yVUqh0/T2f5e9E1lDNuIqLyXe8VwwUsS72A1EGtg0s77+xUQ7KiGRbHD4bsBo
+A74EI7MHQ7163wVPT0VWFRvUmmv+UO7W8wIDAQAB
+-----END RSA PUBLIC KEY-----"#;
+
+        let der = WebSocketTransport::pem_to_pkcs1_der(test_public_key_pem).unwrap();
+        let (n, e) = WebSocketTransport::parse_rsa_public_key(&der).unwrap();
+
+        // Verify standard RSA exponent
+        assert_eq!(
+            e,
+            BigUint::from(65537u32),
+            "Expected standard RSA exponent 65537"
+        );
+
+        // Verify modulus size: n.to_bytes_be() should be 256 bytes for a 2048-bit key
+        let n_bytes = n.to_bytes_be();
+        assert_eq!(
+            n_bytes.len(),
+            256,
+            "2048-bit modulus should be 256 bytes in big-endian, got {}",
+            n_bytes.len()
+        );
+        // The high byte should have the top bit set (modulus is close to 2^2048)
+        assert!(
+            n_bytes[0] & 0x80 != 0,
+            "High byte of 2048-bit modulus should have top bit set, got 0x{:02x}",
+            n_bytes[0]
+        );
+
+        // Verify bit length
+        assert!(
+            n.bits() > 2040 && n.bits() <= 2048,
+            "Expected ~2048-bit modulus, got {} bits",
+            n.bits()
+        );
+    }
+
+    #[test]
+    fn test_encrypt_password_with_1024_bit_key_decrypts_correctly() {
+        // Test-only 1024-bit RSA keypair. Do not use in production.
+        let pub_pem = r#"-----BEGIN RSA PUBLIC KEY-----
+MIGJAoGBAM5D4w7VjlVI8hUmJj8MXx4glxP3dqroATH1hito7CzfGGD/Ss73lp/n
+0JLwI4oT6g0wBiMlLkPY6C+hfTI2x/UhJE8gKhz6URld6uQ29d0PAq4OvsZW5Rhz
+nuIWmHv9WKvS/5DVcNbBtkiTJ9BDnsSQW/YqA4DQGmzph4ThqEkJAgMBAAE=
+-----END RSA PUBLIC KEY-----"#;
+
+        // PKCS#1 private key DER fields: SEQUENCE of 9 INTEGERs
+        // [version, n, e, d, p, q, dp, dq, qinv]
+        // We only need n and d for decryption.
+        let priv_pem = r#"-----BEGIN RSA PRIVATE KEY-----
+MIICXQIBAAKBgQDOQ+MO1Y5VSPIVJiY/DF8eIJcT93aq6AEx9YYraOws3xhg/0rO
+95af59CS8COKE+oNMAYjJS5D2OgvoX0yNsf1ISRPICoc+lEZXerkNvXdDwKuDr7G
+VuUYc57iFph7/Vir0v+Q1XDWwbZIkyfQQ57EkFv2KgOA0Bps6YeE4ahJCQIDAQAB
+AoGAVYDAu+J86Q+fAnNZAWPAfj2mQumfMIOSE0KjBpWs6YDlmzfYq+jocIro5DBV
+myRcLnFM6f68qfVdcnkv68PXqSA7acyTtAKSIJAgN1xiYELuRVWMk/+UVgGhRpcH
+rY4sTIwPM5b9r6JA++6PX13b8qqybPijf/Lz5urEbU3oPu0CQQDmZrbz623uijm4
+ifEhk6f+Gq4spF5tUHVwY/GlfdtaDPr/wSTBkeKweZIAd9LJh8iv7Il2tYNKzzot
+BTMut3VnAkEA5S6sKNaeLQevYy7N2zKm2SdSKKo1Sh48+oLYd2CZQGG5jDRom6p/
+e+4hol1jGDBwvx0sMrFCFsoQXRiP2etYDwJBANSDj2LjF837Xwww5+IhkMVXlKoG
+njZUDU6yUPRlZwrjiCyY2S9WQXKnX5zg6OMMRHbIRW7iM4ywIafe8Pu5KicCQQCE
+rB8nyQ5qfP9wSGENWuYx4cxzFA2jaZvdXa/Yc8hj9+7FFnXUX8BLSxCXgL5j+27Z
+hBbZBbp/nNwaOKTV/6LLAkAjNOwM7VST6Medyd2lNpsCjmYAoF0eUf8Z8ZJPaZeo
+El6NrMeFybqeqwjPHPG1oCwg4YIeaT8ZB2qUW143brUB
+-----END RSA PRIVATE KEY-----"#;
+
+        let password = "exasol_secret_123";
+        let encrypted = WebSocketTransport::encrypt_password(password, pub_pem)
+            .expect("encryption should succeed");
+
+        // Decode ciphertext
+        let ciphertext = STANDARD.decode(&encrypted).expect("valid base64");
+        assert_eq!(
+            ciphertext.len(),
+            128,
+            "1024-bit RSA ciphertext must be 128 bytes"
+        );
+
+        // Parse the private key to extract n and d
+        let (n, d) = parse_pkcs1_private_key_n_d(priv_pem);
+
+        // RSA decrypt: m = c^d mod n
+        let c = BigUint::from_bytes_be(&ciphertext);
+        let m = c.modpow(&d, &n);
+
+        // Convert to fixed-width bytes and strip PKCS#1 v1.5 padding
+        let k = 128; // 1024 bits / 8
+        let mut em = vec![0u8; k];
+        let m_bytes = m.to_bytes_be();
+        em[k - m_bytes.len()..].copy_from_slice(&m_bytes);
+
+        // EM format: 0x00 || 0x02 || PS (non-zero) || 0x00 || M
+        assert_eq!(em[0], 0x00, "EM must start with 0x00");
+        assert_eq!(em[1], 0x02, "EM block type must be 0x02");
+
+        // Find the 0x00 separator after PS
+        let separator_pos = em[2..]
+            .iter()
+            .position(|&b| b == 0x00)
+            .expect("Must find 0x00 separator after PS padding");
+        let message_start = 2 + separator_pos + 1;
+
+        // Verify PS is all non-zero
+        for (i, &b) in em[2..2 + separator_pos].iter().enumerate() {
+            assert_ne!(b, 0x00, "PS byte at position {} must be non-zero", i);
+        }
+
+        // Verify PS is at least 8 bytes (PKCS#1 v1.5 requirement)
+        assert!(
+            separator_pos >= 8,
+            "PS must be at least 8 bytes, got {}",
+            separator_pos
+        );
+
+        // Extract and verify the decrypted message matches the original password
+        let decrypted = &em[message_start..];
+        assert_eq!(
+            decrypted,
+            password.as_bytes(),
+            "Decrypted message must match original password"
+        );
+    }
+
+    /// Parse a PKCS#1 RSA private key PEM to extract (n, d).
+    /// Only used in tests. The PKCS#1 private key is:
+    /// SEQUENCE { version, n, e, d, p, q, dp, dq, qinv }
+    fn parse_pkcs1_private_key_n_d(pem: &str) -> (BigUint, BigUint) {
+        // Strip PEM headers
+        let start_marker = "-----BEGIN RSA PRIVATE KEY-----";
+        let end_marker = "-----END RSA PRIVATE KEY-----";
+        let start = pem.find(start_marker).unwrap() + start_marker.len();
+        let end = pem.find(end_marker).unwrap();
+        let base64_content: String = pem[start..end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let der = STANDARD.decode(&base64_content).unwrap();
+
+        let mut pos = 0;
+
+        // Outer SEQUENCE
+        assert_eq!(der[pos], 0x30);
+        pos += 1;
+        let (_, len_bytes) = read_test_der_length(&der[pos..]);
+        pos += len_bytes;
+
+        // version INTEGER (skip)
+        let (_, consumed) = read_test_der_integer(&der[pos..]);
+        pos += consumed;
+
+        // n INTEGER
+        let (n_bytes, consumed) = read_test_der_integer(&der[pos..]);
+        pos += consumed;
+        let n = BigUint::from_bytes_be(n_bytes);
+
+        // e INTEGER (skip)
+        let (_, consumed) = read_test_der_integer(&der[pos..]);
+        pos += consumed;
+
+        // d INTEGER
+        let (d_bytes, _) = read_test_der_integer(&der[pos..]);
+        let d = BigUint::from_bytes_be(d_bytes);
+
+        (n, d)
+    }
+
+    fn read_test_der_length(data: &[u8]) -> (usize, usize) {
+        let first = data[0];
+        if first < 0x80 {
+            (first as usize, 1)
+        } else {
+            let num_bytes = (first & 0x7F) as usize;
+            let mut len: usize = 0;
+            for &b in &data[1..1 + num_bytes] {
+                len = (len << 8) | (b as usize);
+            }
+            (len, 1 + num_bytes)
+        }
+    }
+
+    fn read_test_der_integer(data: &[u8]) -> (&[u8], usize) {
+        assert_eq!(data[0], 0x02, "Expected INTEGER tag");
+        let (int_len, len_bytes) = read_test_der_length(&data[1..]);
+        let header_len = 1 + len_bytes;
+        let mut value = &data[header_len..header_len + int_len];
+        // Strip leading 0x00 sign-bit padding
+        if value.len() > 1 && value[0] == 0x00 {
+            value = &value[1..];
+        }
+        (value, header_len + int_len)
     }
 
     #[test]
