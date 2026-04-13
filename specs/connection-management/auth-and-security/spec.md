@@ -38,6 +38,23 @@ Connection parameters are required for Exasol connectivity and SHALL be validate
 * *WHEN* authenticating with username and password
 * *THEN* it SHALL send credentials securely over the connection
 * *AND* it SHALL support encrypted password transmission
+* *AND* it SHALL encrypt passwords using RSA PKCS#1 v1.5 with any server-provided public key whose modulus is between 1024 and 8192 bits inclusive
+
+### Scenario: Password encryption with 1024-bit RSA public key
+
+* *GIVEN* the Exasol server responds to the login request with a 1024-bit RSA public key in PKCS#1 PEM format
+* *WHEN* the driver encrypts the user's password for transmission
+* *THEN* the driver SHALL successfully parse the 1024-bit modulus and public exponent
+* *AND* the driver SHALL apply PKCS#1 v1.5 padding and compute `ciphertext = message^e mod n`
+* *AND* the driver SHALL produce a base64-encoded ciphertext whose decoded length equals the modulus length in bytes (128 bytes for a 1024-bit key)
+* *AND* the driver SHALL complete the login handshake without raising a key-size-related error
+
+### Scenario: Password encryption rejects out-of-range RSA key sizes
+
+* *GIVEN* the Exasol server responds with an RSA public key whose modulus is smaller than 1024 bits or larger than 8192 bits
+* *WHEN* the driver attempts to encrypt the password
+* *THEN* the driver SHALL return a `ProtocolError` indicating the unsupported key size
+* *AND* the driver SHALL NOT attempt the modular exponentiation
 
 ### Scenario: Authentication failure
 
