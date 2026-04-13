@@ -378,7 +378,7 @@ impl ConnectionBuilder {
             connection_timeout,
             query_timeout,
             idle_timeout,
-            use_tls: self.use_tls.unwrap_or(false),
+            use_tls: self.use_tls.unwrap_or(true),
             validate_server_certificate: self.validate_server_certificate.unwrap_or(true),
             certificate_fingerprint: self.certificate_fingerprint,
             client_name: self.client_name.unwrap_or_else(|| "exarrow-rs".to_string()),
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(params.connection_timeout, Duration::from_secs(30));
         assert_eq!(params.query_timeout, Duration::from_secs(300));
         assert_eq!(params.idle_timeout, Duration::from_secs(600));
-        assert!(!params.use_tls);
+        assert!(params.use_tls);
         assert!(params.validate_server_certificate);
         assert_eq!(params.client_name, "exarrow-rs");
     }

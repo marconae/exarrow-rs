@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- **Breaking default change**: connections now default to `tls=true` to match the Exasol server 7.1+ requirement and every official Exasol driver (pyexasol, JDBC, Go, ODBC). Callers that relied on the previous `tls=false` default — e.g. to reach legacy (pre-7.1) Exasol servers — must set `?tls=false` explicitly on the connection string or `.use_tls(false)` on the builder.
+- **Docker recipe**: Exasol Docker containers ship with a self-signed certificate. Connection strings must set `?validateservercertificate=0` (alias `validate_certificate=false`) to accept it. Example: `exasol://sys:exasol@localhost:8563?validateservercertificate=0` — no `?tls=true` needed.
+- Certificate validation default (`validateservercertificate=true`) is unchanged and matches every official Exasol driver.
+
 ## 0.7.3
 
 - Security: update vulnerable transitive dependencies to address 4 Dependabot advisories.

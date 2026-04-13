@@ -82,7 +82,8 @@ Specifications live in `specs/` using a `specs/<domain>/<feature>/spec.md` struc
 
 ## Important Constraints
 
-- TLS enabled by default; production Exasol requires it
+- TLS is enabled by default in both the public connection-string/builder API and the low-level transport struct, matching Exasol 7.1+ (which requires TLS on port 8563) and all official Exasol drivers (pyexasol, JDBC, Go, ODBC).
+- Certificate validation is on by default. Exasol Docker containers ship a self-signed certificate — test connection strings must set `?validateservercertificate=0` to accept it.
 - Never log or expose connection passwords
 - Integration tests require running Exasol instance
 

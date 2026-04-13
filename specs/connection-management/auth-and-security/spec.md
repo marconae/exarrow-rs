@@ -28,8 +28,10 @@ Connection parameters are required for Exasol connectivity and SHALL be validate
 
 * *GIVEN* connection parameters are configured
 * *WHEN* TLS/SSL is requested
-* *THEN* it SHALL support enabling encrypted connections
-* *AND* it SHALL validate certificate settings if certificate validation is enabled
+* *THEN* it SHALL enable TLS by default when the `tls` parameter (aliases `ssl`, `use_tls`) is omitted from the connection string
+* *AND* it SHALL enable server-certificate validation by default when the `validate_certificate` parameter (aliases `verify_certificate`, `validateservercertificate`) is omitted
+* *AND* it SHALL honor an explicit `tls=false` to disable TLS for legacy (pre-7.1) Exasol servers
+* *AND* it SHALL honor an explicit `validateservercertificate=0` to disable certificate validation for self-signed certificates (e.g. Exasol Docker)
 * *AND* it SHALL accept an optional certificate fingerprint for pin-based validation
 
 ### Scenario: Username and password authentication

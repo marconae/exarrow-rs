@@ -16,7 +16,7 @@ exasol://[user[:password]@]host[:port][/schema][?params]
 exasol://localhost:8563
 exasol://user:password@localhost:8563
 exasol://user:password@exasol.example.com:8563/my_schema
-exasol://user:password@host:8563/schema?tls=false&connection_timeout=60
+exasol://user:password@host:8563/schema?connection_timeout=60
 ```
 
 ## Docker Quickstart
@@ -32,7 +32,7 @@ Default credentials: `sys` / `exasol`
 Recommended connection string for Docker:
 
 ```
-exasol://sys:exasol@localhost:8563?tls=true&validateservercertificate=0
+exasol://sys:exasol@localhost:8563?validateservercertificate=0
 ```
 
 > [!NOTE]
@@ -62,7 +62,7 @@ All parameters are set via URL query string (`?key=value&key2=value2`).
 
 | Parameter | Aliases | Default | Description |
 |---|---|---|---|
-| `tls` | `ssl`, `use_tls` | `false` | Enable TLS/SSL encryption |
+| `tls` | `ssl`, `use_tls` | `true` | Enable TLS/SSL encryption |
 | `validate_certificate` | `verify_certificate`, `validateservercertificate` | `true` | Validate the server's TLS certificate |
 | `certificate_fingerprint` | `certificatefingerprint` | — | Pin connection to a specific server certificate (SHA-256 hex of DER cert) |
 | `connection_timeout` | `timeout` | `30` | Connection timeout in seconds (max 300) |
@@ -116,16 +116,18 @@ The following attributes are read-only and cannot be set via the connection stri
 
 ## TLS Configuration
 
-TLS is **disabled** by default. For production environments, enable TLS and keep certificate validation on:
+TLS is **enabled** by default, matching Exasol 7.1+ (which requires TLS on port 8563) and all official Exasol drivers.
+
+**Docker / self-signed certificate** — disable certificate validation (TLS stays on):
 
 ```
-exasol://user:password@host:8563?tls=true
+exasol://user:password@host:8563?validateservercertificate=0
 ```
 
-For development with self-signed certificates, disable certificate validation:
+**Legacy pre-7.1 Exasol server** — disable TLS entirely:
 
 ```
-exasol://user:password@host:8563?tls=true&validateservercertificate=0
+exasol://user:password@host:8563?tls=false
 ```
 
 ## Timeouts
