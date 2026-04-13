@@ -14,6 +14,20 @@ Default credentials: `sys` / `exasol` on `localhost:8563`
 exapump sql 'select 1'   # Uses default profile; should return "1"
 ```
 
+## Sandbox Configuration
+
+Claude Code runs commands in a sandbox. Testing relies on the following already being configured in `.claude/settings.local.json` and the global `~/.claude/settings.json` — do not re-prompt the user about sandbox failures for these:
+
+- **Network**: `localhost`, `127.0.0.1`, `*.exasol.com`, `crates.io`, `*.crates.io`, `docs.rs`, `github.com`, `*.github.com` are allowed (covers `cargo build/test`, `cargo fetch`, Exasol WebSocket on `localhost:8563`).
+- **Filesystem**: the repository root is writable (covers `target/`, `Cargo.lock`, test fixtures).
+- **Commands excluded from the sandbox** (run with full privileges): `docker`, `exapump`, `uv`, `qmd`, `zola`, `agent-browser`. `docker` is excluded because it needs `/var/run/docker.sock`, which the sandbox blocks.
+
+If a test genuinely fails because of sandbox restrictions (not a real code bug), the fix is to extend `.claude/settings.local.json` — not to bypass the sandbox per-command. In particular, `cargo test`, `cargo clippy`, `cargo fmt`, `cargo build` all run fine inside the sandbox; do not disable sandboxing for them.
+
+**Gotchas**:
+- `excludedCommands` in project settings **replaces** (does not merge with) the global list. Always re-list every command you still need excluded (`docker`, `exapump`, `uv`, `qmd`, `zola`, `agent-browser`).
+- Sandbox rules are loaded at **session start**. Edits to `settings.local.json` only take effect after restarting Claude Code.
+
 ## Build & Test Commands
 
 ```bash
