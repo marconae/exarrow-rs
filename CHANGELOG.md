@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+- Security: update vulnerable transitive dependencies to address 4 Dependabot advisories.
+  - `lz4_flex` 0.12.0 → 0.12.1 (GHSA-vvp9-7p8x-rfvv, high — decompression may leak uninitialized memory).
+  - `aws-lc-sys` 0.38.0 → 0.39.1 via `aws-lc-rs` 1.16.1 → 1.16.2 (GHSA-394x-vwmw-crm3 high — X.509 Name Constraints bypass; GHSA-9f94-5g5w-gf6r high — CRL Distribution Point scope check logic error).
+  - `rustls-webpki` 0.103.9 → 0.103.11 (GHSA-pwjx-qhcg-rvj4, medium — CRL Distribution Point authority matching).
+
 ## 0.7.2
 
 - Support RSA 1024-bit public keys during the Exasol login handshake (e.g. `demodb.exasol.com`). Previously failed with `Failed to parse RSA public key` because aws-lc-rs enforces a 2048-bit minimum; the driver now uses an in-tree PKCS#1 v1.5 encryption path covering 1024–8192 bit moduli.
