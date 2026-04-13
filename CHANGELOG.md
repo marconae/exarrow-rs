@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- Support RSA 1024-bit public keys during the Exasol login handshake (e.g. `demodb.exasol.com`). Previously failed with `Failed to parse RSA public key` because aws-lc-rs enforces a 2048-bit minimum; the driver now uses an in-tree PKCS#1 v1.5 encryption path covering 1024–8192 bit moduli.
+
 ## 0.7.1
 
 - Add support for certificate fingerprints

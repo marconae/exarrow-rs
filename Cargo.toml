@@ -1,6 +1,6 @@
 [package]
 name = "exarrow-rs"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 license = "MIT"
 authors = ["Exasol Labs <labs@exasol.com>"]
@@ -49,6 +49,11 @@ hex = "0.4"
 # RSA encryption for Exasol authentication (aws-lc-rs replaces rsa crate to eliminate CVE-2023-49092)
 aws-lc-rs = "1"
 base64 = "0.22"
+
+# Pure-Rust big-integer modular exponentiation for RSA PKCS#1 v1.5 password encryption.
+# Needed because aws-lc-rs's PublicEncryptingKey enforces a 2048-bit minimum and Exasol
+# servers (e.g. demodb.exasol.com) emit 1024-bit keys during the login handshake.
+num-bigint = "0.4"
 
 # ADBC core traits (optional, for FFI export)
 adbc_core = { version = "0.22.0", optional = true }
