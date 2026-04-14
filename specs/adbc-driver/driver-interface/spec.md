@@ -13,6 +13,7 @@ The system implements the ADBC (Arrow Database Connectivity) driver interface to
 * *GIVEN* an ADBC driver manager is ready to load drivers
 * *WHEN* the driver is loaded by an ADBC driver manager
 * *THEN* it SHALL expose driver metadata including name, version, and vendor information
+* *AND* it SHALL be compatible with ADBC driver manager version 0.23
 
 ### Scenario: Driver initialization
 
@@ -87,3 +88,11 @@ The system implements the ADBC (Arrow Database Connectivity) driver interface to
 * *THEN* the driver SHALL parse `INTERVAL DAY(2) TO SECOND(3)` and `INTERVAL DAY(9) TO SECOND(9)` as valid INTERVAL DAY TO SECOND types
 * *AND* the driver SHALL extract the seconds fraction precision from the SECOND parameter
 * *AND* the driver SHALL NOT return an "Unknown Exasol type" error
+
+### Scenario: Boxed RecordBatchReader return type compliance
+
+* *GIVEN* the ADBC FFI driver is loaded by a driver manager
+* *WHEN* any method that returns query results is called (execute, get_info, get_objects, get_table_types, get_statistic_names, get_statistics, read_partition)
+* *THEN* it SHALL return a `Box<dyn RecordBatchReader + Send>` with `'static` lifetime
+* *AND* the returned reader SHALL be usable after the originating statement or connection method returns
+* *AND* the returned reader SHALL own all its data without borrowing from the statement
