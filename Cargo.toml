@@ -1,6 +1,6 @@
 [package]
 name = "exarrow-rs"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 license = "MIT"
 authors = ["Exasol Labs <labs@exasol.com>"]
@@ -56,8 +56,8 @@ base64 = "0.22"
 num-bigint = "0.4"
 
 # ADBC core traits (optional, for FFI export)
-adbc_core = { version = "0.22.0", optional = true }
-adbc_ffi = { version = "0.22.0", optional = true }
+adbc_core = { version = "0.23.0", optional = true }
+adbc_ffi = { version = "0.23.0", optional = true }
 
 # TLS certificate generation for secure import/export
 rcgen = "0.13"
@@ -94,8 +94,8 @@ polars = { version = "0.46", features = ["lazy", "ipc_streaming", "dtype-decimal
 # Mocking for tests
 mockall = "0.14.0"
 # ADBC driver manager and core for integration testing
-adbc_driver_manager = "0.22"
-adbc_core = "0.22"
+adbc_driver_manager = "0.23"
+adbc_core = "0.23"
 tempfile = "3.24.0"
 # Environment variable loading for examples
 dotenvy = "0.15"

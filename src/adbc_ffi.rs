@@ -983,7 +983,7 @@ impl adbc_core::Connection for FfiConnection {
     fn get_info(
         &self,
         _codes: Option<HashSet<InfoCode>>,
-    ) -> AdbcResult<impl RecordBatchReader + Send> {
+    ) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
         // Return driver info as a RecordBatch
         use arrow::array::builder::{StringBuilder, UInt32Builder};
         use arrow::datatypes::{DataType, Field};
@@ -1017,7 +1017,7 @@ impl adbc_core::Connection for FfiConnection {
         )
         .map_err(|e| AdbcError::with_message_and_status(e.to_string(), AdbcStatus::Internal))?;
 
-        Ok(VecRecordBatchReader::new(schema, vec![batch]))
+        Ok(Box::new(VecRecordBatchReader::new(schema, vec![batch])))
     }
 
     fn get_objects(
@@ -1028,7 +1028,7 @@ impl adbc_core::Connection for FfiConnection {
         table_name: Option<&str>,
         table_type: Option<Vec<&str>>,
         column_name: Option<&str>,
-    ) -> AdbcResult<impl RecordBatchReader + Send> {
+    ) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
         use arrow::array::builder::{
             ArrayBuilder, Int32Builder, ListBuilder, StringBuilder, StructBuilder,
         };
@@ -1039,7 +1039,7 @@ impl adbc_core::Connection for FfiConnection {
             if !cat.eq_ignore_ascii_case("EXA") {
                 // Return empty result with correct schema
                 let schema = Arc::new(build_get_objects_schema());
-                return Ok(VecRecordBatchReader::empty(schema));
+                return Ok(Box::new(VecRecordBatchReader::empty(schema)));
             }
         }
 
@@ -1442,7 +1442,7 @@ impl adbc_core::Connection for FfiConnection {
         )
         .map_err(|e| AdbcError::with_message_and_status(e.to_string(), AdbcStatus::Internal))?;
 
-        Ok(VecRecordBatchReader::new(schema, vec![batch]))
+        Ok(Box::new(VecRecordBatchReader::new(schema, vec![batch])))
     }
 
     fn get_table_schema(
@@ -1535,7 +1535,7 @@ impl adbc_core::Connection for FfiConnection {
         Ok(Schema::new(fields))
     }
 
-    fn get_table_types(&self) -> AdbcResult<impl RecordBatchReader + Send> {
+    fn get_table_types(&self) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
         use arrow::array::builder::StringBuilder;
         use arrow::datatypes::{DataType, Field};
 
@@ -1553,16 +1553,16 @@ impl adbc_core::Connection for FfiConnection {
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(builder.finish())])
             .map_err(|e| AdbcError::with_message_and_status(e.to_string(), AdbcStatus::Internal))?;
 
-        Ok(VecRecordBatchReader::new(schema, vec![batch]))
+        Ok(Box::new(VecRecordBatchReader::new(schema, vec![batch])))
     }
 
-    fn get_statistic_names(&self) -> AdbcResult<impl RecordBatchReader + Send> {
+    fn get_statistic_names(&self) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
         use arrow::datatypes::{DataType, Field};
         let schema = Arc::new(Schema::new(vec![
             Field::new("statistic_name", DataType::Utf8, false),
             Field::new("statistic_key", DataType::Int16, false),
         ]));
-        Ok(VecRecordBatchReader::empty(schema))
+        Ok(Box::new(VecRecordBatchReader::empty(schema)))
     }
 
     fn get_statistics(
@@ -1571,8 +1571,8 @@ impl adbc_core::Connection for FfiConnection {
         _db_schema: Option<&str>,
         _table_name: Option<&str>,
         _approximate: bool,
-    ) -> AdbcResult<impl RecordBatchReader + Send> {
-        Err::<VecRecordBatchReader, _>(AdbcError::with_message_and_status(
+    ) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
+        Err::<Box<dyn RecordBatchReader + Send>, _>(AdbcError::with_message_and_status(
             "get_statistics not yet implemented",
             AdbcStatus::NotImplemented,
         ))
@@ -1613,8 +1613,8 @@ impl adbc_core::Connection for FfiConnection {
     fn read_partition(
         &self,
         _partition: impl AsRef<[u8]>,
-    ) -> AdbcResult<impl RecordBatchReader + Send> {
-        Err::<VecRecordBatchReader, _>(AdbcError::with_message_and_status(
+    ) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
+        Err::<Box<dyn RecordBatchReader + Send>, _>(AdbcError::with_message_and_status(
             "Partitioned results not supported",
             AdbcStatus::NotImplemented,
         ))
@@ -2085,10 +2085,13 @@ impl adbc_core::Statement for FfiStatement {
         Ok(())
     }
 
-    fn execute(&mut self) -> AdbcResult<impl RecordBatchReader + Send> {
+    fn execute(&mut self) -> AdbcResult<Box<dyn RecordBatchReader + Send>> {
         if self.options.contains_key("adbc.ingest.target_table") {
             self.execute_bulk_ingest()?;
-            return Ok(VecRecordBatchReader::new(Arc::new(Schema::empty()), vec![]));
+            return Ok(Box::new(VecRecordBatchReader::new(
+                Arc::new(Schema::empty()),
+                vec![],
+            )));
         }
 
         let sql = self.sql.as_ref().ok_or_else(|| {
@@ -2143,7 +2146,7 @@ impl adbc_core::Statement for FfiStatement {
                 all_batches[0].schema()
             };
 
-            return Ok(VecRecordBatchReader::new(schema, all_batches));
+            return Ok(Box::new(VecRecordBatchReader::new(schema, all_batches)));
         }
 
         let sql = sql.clone();
@@ -2184,7 +2187,7 @@ impl adbc_core::Statement for FfiStatement {
             batches[0].schema()
         };
 
-        Ok(VecRecordBatchReader::new(schema, batches))
+        Ok(Box::new(VecRecordBatchReader::new(schema, batches)))
     }
 
     fn execute_update(&mut self) -> AdbcResult<Option<i64>> {

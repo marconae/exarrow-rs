@@ -52,7 +52,7 @@ Exasol lacks an Arrow-native driver. Existing connectors require row-based data 
 | TLS | rustls 0.23 / rcgen 0.13 | Connection encryption and ad-hoc certificate generation for HTTP tunnels |
 | Crypto | aws-lc-rs 1 | RSA encryption for Exasol password authentication |
 | Serialization | serde / serde_json | Exasol WebSocket JSON protocol |
-| ADBC FFI | adbc_core / adbc_ffi 0.21 (optional) | C FFI bindings for driver manager integration |
+| ADBC FFI | adbc_core / adbc_ffi 0.23 (optional) | C FFI bindings for driver manager integration |
 | Testing | cargo test / mockall 0.14 | Unit and integration testing with mocking |
 
 ## Commands

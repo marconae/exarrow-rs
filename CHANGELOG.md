@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.0
+
+- Upgrade ADBC dependency from 0.22 to 0.23 (breaking: methods now return Box<dyn RecordBatchReader>)
+
 ## 0.8.0
 
 - **Breaking default change**: connections now default to `tls=true` to match the Exasol server 7.1+ requirement and every official Exasol driver (pyexasol, JDBC, Go, ODBC). Callers that relied on the previous `tls=false` default — e.g. to reach legacy (pre-7.1) Exasol servers — must set `?tls=false` explicitly on the connection string or `.use_tls(false)` on the builder.
