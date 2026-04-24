@@ -100,7 +100,7 @@ pub struct NativeTcpTransport {
     session: Option<SessionInfo>,
     tls_active: bool,
     fetch_positions: HashMap<i32, i64>,
-    result_columns: HashMap<i32, Vec<NativeColumnMeta>>,
+    result_columns: HashMap<i32, Arc<Vec<NativeColumnMeta>>>,
     recv_buf: Vec<u8>,
 }
 
@@ -648,7 +648,8 @@ impl NativeTcpTransport {
             // The server auto-closes a handle when all rows are returned in the initial
             // response; caching metadata for such handles causes spurious CMD_FETCH2 calls.
             if *handle != SMALL_RESULTSET {
-                self.result_columns.insert(*handle, columns.clone());
+                self.result_columns
+                    .insert(*handle, Arc::new(columns.clone()));
             }
         }
         Self::native_result_to_query_result(response)
@@ -1077,7 +1078,7 @@ impl TransportProtocol for NativeTcpTransport {
         let cached_columns = self
             .result_columns
             .get(&handle_id)
-            .cloned()
+            .map(Arc::clone)
             .ok_or_else(|| {
                 TransportError::ProtocolError("No cached column metadata for fetch".into())
             })?;
