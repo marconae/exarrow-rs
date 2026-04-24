@@ -1,228 +1,153 @@
-//! Integration tests for exarrow-rs ADBC driver.
+//! WebSocket transport integration tests for exarrow-rs ADBC driver.
 //!
-//! # Overview
+//! Mirrors all functional tests from `integration_tests.rs` but forces
+//! `transport=websocket` in the connection string. Gated behind the
+//! `websocket` feature flag.
 //!
-//! This test module provides integration tests that validate exarrow-rs
-//! against a real Exasol database instance. Unlike unit tests that use
-//! mocked dependencies, these tests verify end-to-end functionality.
-//!
-//! # Prerequisites
-//!
-//! Before running these tests, ensure you have:
-//!
-//! 1. Docker installed and running
-//! 2. An Exasol database container running:
-//!
-//!    ```bash
-//!    docker run -d --name exasol-test \
-//!      -p 8563:8563 \
-//!      --privileged \
-//!      exasol/docker-db:latest
-//!    ```
-//!
-//! 3. Wait for the database to be ready (1-2 minutes on first run):
-//!
-//!    ```bash
-//!    docker logs exasol-test 2>&1 | grep -i "started"
-//!    ```
-//!
-//! # Configuration
-//!
-//! Tests use environment variables with sensible defaults:
-//!
-//! | Variable         | Default     | Description           |
-//! |-----------------|-------------|-----------------------|
-//! | `EXASOL_HOST`   | localhost   | Database host         |
-//! | `EXASOL_PORT`   | 8563        | Database port         |
-//! | `EXASOL_USER`   | sys         | Username              |
-//! | `EXASOL_PASSWORD` | exasol    | Password              |
-//!
-//! # Running Tests
-//!
-//! Integration tests are marked with `#[ignore]` to prevent failures in
-//! CI environments without Exasol. Run them explicitly:
+//! # Running
 //!
 //! ```bash
-//! # Run all integration tests
-//! cargo test --test integration_tests -- --ignored
-//!
-//! # Run a specific test
-//! cargo test --test integration_tests test_connection_succeeds -- --ignored
-//!
-//! # Run with verbose output
-//! cargo test --test integration_tests -- --ignored --nocapture
-//!
-//! # Run with custom Exasol instance
-//! EXASOL_HOST=192.168.1.100 cargo test --test integration_tests -- --ignored
+//! cargo test --no-default-features --features websocket --test websocket_integration_tests
 //! ```
-//!
-//! # Test Organization
-//!
-//! Tests are organized by functionality:
-//! - `infrastructure_*` - Validates test setup and helpers
-//! - `connection_*` - Connection establishment and management
-//! - `query_*` - Query execution and results
-//! - `ddl_*` - Schema and table operations
-//! - `dml_*` - Data manipulation
-//! - `transaction_*` - Transaction handling
-//! - `arrow_*` - Arrow conversion validation
-//! - `prepared_*` - Prepared statement lifecycle and execution
 
-// Declare the common module for shared test utilities
+#![cfg(feature = "websocket")]
+
 mod common;
 
 use arrow::array::{Array, BooleanArray, Float64Array, StringArray};
 use arrow::datatypes::DataType;
-use common::{
-    generate_test_schema_name, get_host, get_port, get_test_connection, get_test_connection_string,
-    get_user, is_exasol_available,
-};
-use exarrow_rs::adbc::Connection;
+use common::{generate_test_schema_name, get_host, get_password, get_port, get_user};
+use exarrow_rs::adbc::{Connection, Driver};
 
-// Infrastructure Tests
-// These tests validate that the test infrastructure itself works correctly.
-
-#[test]
-fn test_connection_string_format_is_valid() {
-    let conn_str = get_test_connection_string();
-
-    // Should start with exasol:// scheme
-    assert!(
-        conn_str.starts_with("exasol://"),
-        "Connection string should start with 'exasol://', got: {}",
-        conn_str
-    );
-
-    // Should contain host and port
-    assert!(
-        conn_str.contains(&get_host()),
-        "Connection string should contain host"
-    );
-    assert!(
-        conn_str.contains(&get_port().to_string()),
-        "Connection string should contain port"
-    );
-
-    // Should contain user (but we don't check password for security)
-    assert!(
-        conn_str.contains(&get_user()),
-        "Connection string should contain username"
-    );
+// Helper: build a connection string that forces the WebSocket transport.
+fn ws_connection_string() -> String {
+    format!(
+        "exasol://{}:{}@{}:{}?tls=true&validateservercertificate=0&transport=websocket",
+        get_user(),
+        get_password(),
+        get_host(),
+        get_port()
+    )
 }
 
-#[test]
-fn test_schema_name_generation_is_unique() {
-    let schema1 = generate_test_schema_name();
-    // Small delay to ensure different timestamp
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    let schema2 = generate_test_schema_name();
+// Helper: open a connection over WebSocket (with retry).
+async fn get_ws_connection() -> Result<Connection, exarrow_rs::error::ExasolError> {
+    use std::time::Duration;
+    let driver = Driver::new();
+    let conn_string = ws_connection_string();
 
-    assert!(
-        schema1.starts_with("TEST_INTEGRATION_"),
-        "Schema should have correct prefix"
-    );
-    assert!(
-        schema2.starts_with("TEST_INTEGRATION_"),
-        "Schema should have correct prefix"
-    );
+    let mut last_error = None;
+    for attempt in 1..=5u32 {
+        let database = driver.open(&conn_string)?;
+        match database.connect().await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                eprintln!("WS connection attempt {}/5 failed: {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 5 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
 
-    // Names should be unique (different timestamps)
-    // Note: In very fast execution, they might be the same, so we just check format
-    assert!(schema1.len() > 17, "Schema name should include timestamp");
+    Err(exarrow_rs::error::ExasolError::Connection(
+        last_error.unwrap(),
+    ))
 }
 
-// Connection Infrastructure Tests (require Exasol)
+// Helper: set up a DML test table inside `schema_name` (schema must already exist).
+async fn ws_setup_dml_test_table(conn: &mut Connection, schema_name: &str) {
+    conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await
+        .expect("CREATE SCHEMA should succeed");
 
+    conn.execute_update(&format!(
+        r#"
+        CREATE TABLE {}.users (
+            id INTEGER,
+            name VARCHAR(100),
+            email VARCHAR(255),
+            age INTEGER
+        )
+        "#,
+        schema_name
+    ))
+    .await
+    .expect("CREATE TABLE should succeed");
+}
+
+// Helper: drop a schema.
+async fn ws_cleanup_schema(conn: &mut Connection, schema_name: &str) {
+    let _ = conn
+        .execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
+        .await;
+}
+
+// ── Section: Transport selection ──────────────────────────────────────────────
+
+/// Verify that the WebSocket transport is actually selected when `transport=websocket`
+/// is present in the connection string.
 #[tokio::test]
-async fn test_connection_helper_works_when_exasol_available() {
+async fn test_ws_transport_selected() {
     skip_if_no_exasol!();
 
-    // Test that get_test_connection() works
-    let conn = get_test_connection()
+    let conn = get_ws_connection()
         .await
-        .expect("Should be able to connect to Exasol");
+        .expect("WebSocket connection should succeed");
 
-    // Connection should be established
-    assert!(
-        !conn.is_closed().await,
-        "Connection should not be closed immediately after creation"
-    );
+    assert!(!conn.is_closed().await, "Connection should be open");
 
-    // Clean up
-    conn.close()
-        .await
-        .expect("Should be able to close connection");
+    conn.close().await.expect("Failed to close connection");
 }
 
+// ── Section 2: Connection ─────────────────────────────────────────────────────
+
+/// 2.1 Connection succeeds with valid credentials over WebSocket.
 #[tokio::test]
-async fn test_is_exasol_available_detects_running_instance() {
-    // This test validates that is_exasol_available() correctly detects
-    // a running Exasol instance when properly configured.
-    //
-    // Note: When running with default config (localhost:8563), this test
-    // will be skipped if Exasol is not available. When running with
-    // EXASOL_HOST set to a valid host, it validates the detection works.
+async fn test_ws_connection_succeeds_with_valid_credentials() {
     skip_if_no_exasol!();
 
-    // If we get here, Exasol is available, so is_exasol_available() should return true
-    assert!(
-        is_exasol_available(),
-        "is_exasol_available() should return true when Exasol is reachable"
-    );
-}
-
-// Section 2: Connection Integration Tests
-// Tests for connection establishment, failure handling, and resource management.
-
-/// 2.1 Test successful connection to Exasol with valid credentials
-#[tokio::test]
-async fn test_connection_succeeds_with_valid_credentials() {
-    skip_if_no_exasol!();
-
-    let conn = get_test_connection()
+    let conn = get_ws_connection()
         .await
-        .expect("Connection with valid credentials should succeed");
+        .expect("WebSocket connection with valid credentials should succeed");
 
-    // Verify connection is active
     assert!(
         !conn.is_closed().await,
         "Connection should be open after successful connect"
     );
 
-    // Verify we have a session ID
     let session_id = conn.session_id();
     assert!(
         !session_id.is_empty(),
         "Session ID should be assigned after connection"
     );
 
-    // Clean up
     conn.close()
         .await
         .expect("Should be able to close connection");
 }
 
-/// 2.2 Test connection failure with invalid credentials (verify error handling)
+/// 2.2 Connection fails with invalid credentials over WebSocket.
 #[tokio::test]
-async fn test_connection_fails_with_invalid_credentials() {
+async fn test_ws_connection_fails_with_invalid_credentials() {
     skip_if_no_exasol!();
 
-    // Try to connect with invalid credentials
-    let result = Connection::builder()
-        .host(&get_host())
-        .port(get_port())
-        .username("invalid_user")
-        .password("wrong_password")
-        .connect()
-        .await;
+    let conn_str = format!(
+        "exasol://invalid_user:wrong_password@{}:{}?tls=true&validateservercertificate=0&transport=websocket",
+        get_host(),
+        get_port()
+    );
 
-    // Connection should fail
+    let driver = Driver::new();
+    let database = driver.open(&conn_str).expect("open should succeed");
+    let result = database.connect().await;
+
     assert!(
         result.is_err(),
         "Connection with invalid credentials should fail"
     );
 
-    // Error message should indicate authentication failure
     let error = result.unwrap_err();
     let error_msg = error.to_string().to_lowercase();
     assert!(
@@ -232,42 +157,35 @@ async fn test_connection_fails_with_invalid_credentials() {
     );
 }
 
-/// 2.3 Test connection closure and resource cleanup
+/// 2.3 Connection closure and cleanup over WebSocket.
 #[tokio::test]
-async fn test_connection_closure_and_cleanup() {
+async fn test_ws_connection_closure_and_cleanup() {
     skip_if_no_exasol!();
 
-    let conn = get_test_connection()
+    let conn = get_ws_connection()
         .await
         .expect("Failed to connect for cleanup test");
 
-    // Get session ID before closing
     let session_id = conn.session_id().to_string();
     assert!(!session_id.is_empty(), "Session ID should exist");
 
-    // Close the connection
     conn.close().await.expect("Connection close should succeed");
-
-    // After closing, we can't verify is_closed on the same connection
-    // because close() consumes self. But the test passing means cleanup worked.
 }
 
-/// 2.4 Test connection health check against live database
+/// 2.4 Connection health check over WebSocket.
 #[tokio::test]
-async fn test_connection_health_check() {
+async fn test_ws_connection_health_check() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection()
+    let mut conn = get_ws_connection()
         .await
         .expect("Failed to connect for health check test");
 
-    // Connection should not be closed
     assert!(
         !conn.is_closed().await,
         "Fresh connection should not be closed"
     );
 
-    // Execute a simple health check query
     let batches = conn
         .query("SELECT 1 AS health_check")
         .await
@@ -276,21 +194,18 @@ async fn test_connection_health_check() {
     assert!(!batches.is_empty(), "Health check should return results");
     assert_eq!(batches[0].num_rows(), 1, "Health check should return 1 row");
 
-    // Clean up
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 3: Basic Query Integration Tests
-// Tests for SELECT queries, Arrow RecordBatch validation, and data retrieval.
+// ── Section 3: Basic Queries ──────────────────────────────────────────────────
 
-/// 3.1 Test SELECT from DUAL returns correct results
+/// 3.1 SELECT from DUAL over WebSocket.
 #[tokio::test]
-async fn test_select_from_dual() {
+async fn test_ws_select_from_dual() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
-    // Exasol supports SELECT without FROM for literals
     let batches = conn
         .query("SELECT 42 AS answer")
         .await
@@ -304,7 +219,6 @@ async fn test_select_from_dual() {
         "Should return exactly one column"
     );
 
-    // Verify the column name
     let schema = batches[0].schema();
     assert_eq!(
         schema.field(0).name(),
@@ -315,12 +229,12 @@ async fn test_select_from_dual() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 3.2 Verify Arrow RecordBatch contains expected schema and data
+/// 3.2 Arrow RecordBatch schema and data over WebSocket.
 #[tokio::test]
-async fn test_arrow_recordbatch_schema_and_data() {
+async fn test_ws_arrow_recordbatch_schema_and_data() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let batches = conn
         .query("SELECT 100 AS num_value, 'hello' AS text_value, TRUE AS bool_value")
@@ -332,10 +246,8 @@ async fn test_arrow_recordbatch_schema_and_data() {
     let batch = &batches[0];
     let schema = batch.schema();
 
-    // Verify schema has 3 fields
     assert_eq!(schema.fields().len(), 3, "Schema should have 3 fields");
 
-    // Verify column names (Exasol uppercases)
     let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert!(
         field_names.contains(&"NUM_VALUE"),
@@ -350,20 +262,18 @@ async fn test_arrow_recordbatch_schema_and_data() {
         "Schema should contain BOOL_VALUE"
     );
 
-    // Verify data
     assert_eq!(batch.num_rows(), 1, "Should have 1 row");
 
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 3.3 Test simple arithmetic expressions (SELECT 1+1)
+/// 3.3 Arithmetic expressions over WebSocket.
 #[tokio::test]
-async fn test_arithmetic_expressions() {
+async fn test_ws_arithmetic_expressions() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
-    // Test various arithmetic operations
     let batches = conn
         .query(
             "SELECT 1+1 AS addition, 10-3 AS subtraction, 4*5 AS multiplication, 20/4 AS division",
@@ -380,14 +290,13 @@ async fn test_arithmetic_expressions() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 3.4 Test string data retrieval and UTF-8 handling
+/// 3.4 String data and UTF-8 over WebSocket.
 #[tokio::test]
-async fn test_string_data_and_utf8() {
+async fn test_ws_string_data_and_utf8() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
-    // Test various string scenarios including UTF-8 characters
     let batches = conn
         .query("SELECT 'Hello, World!' AS english, 'Gruess Gott' AS german, 'Bonjour' AS french")
         .await
@@ -398,7 +307,6 @@ async fn test_string_data_and_utf8() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 1, "Should return 1 row");
 
-    // Verify string column data type
     let schema = batch.schema();
     for field in schema.fields() {
         assert!(
@@ -410,19 +318,17 @@ async fn test_string_data_and_utf8() {
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 4: DDL Integration Tests
-// Tests for CREATE/DROP SCHEMA and TABLE operations.
+// ── Section 4: DDL ────────────────────────────────────────────────────────────
 
-/// 4.1 Test CREATE SCHEMA for test isolation
+/// 4.1 CREATE SCHEMA over WebSocket.
 #[tokio::test]
-async fn test_create_schema() {
+async fn test_ws_create_schema() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Create schema
     let result = conn
         .execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await;
@@ -433,12 +339,11 @@ async fn test_create_schema() {
         result.err()
     );
 
-    // Verify schema exists by opening it
     let open_result = conn
         .execute_update(&format!("OPEN SCHEMA {}", schema_name))
         .await;
 
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
 
     assert!(
         open_result.is_ok(),
@@ -449,21 +354,19 @@ async fn test_create_schema() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 4.2 Test CREATE TABLE with various column types
+/// 4.2 CREATE TABLE with various column types over WebSocket.
 #[tokio::test]
-async fn test_create_table_various_types() {
+async fn test_ws_create_table_various_types() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Create schema first
     conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await
         .expect("CREATE SCHEMA should succeed");
 
-    // Create table with various column types
     let create_table_sql = format!(
         r#"
         CREATE TABLE {}.test_types (
@@ -487,7 +390,6 @@ async fn test_create_table_various_types() {
         result.err()
     );
 
-    // Verify table exists by querying it
     let query_result = conn
         .query(&format!(
             "SELECT * FROM {}.test_types WHERE 1=0",
@@ -495,7 +397,7 @@ async fn test_create_table_various_types() {
         ))
         .await;
 
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
 
     assert!(
         query_result.is_ok(),
@@ -505,12 +407,12 @@ async fn test_create_table_various_types() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 4.2b Regression: DDL followed by DML and SELECT must keep the native connection aligned.
+/// 4.2b DDL followed by DML and SELECT over WebSocket.
 #[tokio::test]
-async fn test_ddl_then_insert_select_same_connection() {
+async fn test_ws_ddl_then_insert_select_same_connection() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -539,7 +441,7 @@ async fn test_ddl_then_insert_select_same_connection() {
         ))
         .await;
 
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
 
     assert!(
         insert_result.is_ok(),
@@ -556,16 +458,15 @@ async fn test_ddl_then_insert_select_same_connection() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 4.3 Test DROP TABLE cleanup
+/// 4.3 DROP TABLE over WebSocket.
 #[tokio::test]
-async fn test_drop_table() {
+async fn test_ws_drop_table() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Setup: Create schema and table
     conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await
         .expect("CREATE SCHEMA should succeed");
@@ -577,7 +478,6 @@ async fn test_drop_table() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Drop the table
     let drop_result = conn
         .execute_update(&format!("DROP TABLE {}.drop_test", schema_name))
         .await;
@@ -588,28 +488,26 @@ async fn test_drop_table() {
         drop_result.err()
     );
 
-    // Verify table no longer exists
     let query_result = conn
         .query(&format!("SELECT * FROM {}.drop_test", schema_name))
         .await;
 
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
 
     assert!(query_result.is_err(), "Query on dropped table should fail");
 
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 4.4 Test DROP SCHEMA cleanup
+/// 4.4 DROP SCHEMA over WebSocket.
 #[tokio::test]
-async fn test_drop_schema() {
+async fn test_ws_drop_schema() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Create schema with a table
     conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await
         .expect("CREATE SCHEMA should succeed");
@@ -621,7 +519,6 @@ async fn test_drop_schema() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Drop schema with CASCADE
     let drop_result = conn
         .execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
         .await;
@@ -632,7 +529,6 @@ async fn test_drop_schema() {
         drop_result.err()
     );
 
-    // Verify schema no longer exists
     let open_result = conn
         .execute_update(&format!("OPEN SCHEMA {}", schema_name))
         .await;
@@ -645,48 +541,18 @@ async fn test_drop_schema() {
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 5: DML Integration Tests
-// Tests for INSERT, SELECT, UPDATE, and DELETE operations.
+// ── Section 5: DML ────────────────────────────────────────────────────────────
 
-/// Helper to create a test schema and table for DML tests
-async fn setup_dml_test_table(conn: &mut Connection, schema_name: &str) {
-    conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
-        .await
-        .expect("CREATE SCHEMA should succeed");
-
-    conn.execute_update(&format!(
-        r#"
-        CREATE TABLE {}.users (
-            id INTEGER,
-            name VARCHAR(100),
-            email VARCHAR(255),
-            age INTEGER
-        )
-        "#,
-        schema_name
-    ))
-    .await
-    .expect("CREATE TABLE should succeed");
-}
-
-/// Helper to cleanup test schema
-async fn cleanup_schema(conn: &mut Connection, schema_name: &str) {
-    let _ = conn
-        .execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
-        .await;
-}
-
-/// 5.1 Test INSERT single row into table
+/// 5.1 INSERT single row over WebSocket.
 #[tokio::test]
-async fn test_insert_single_row() {
+async fn test_ws_insert_single_row() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert single row
     let insert_result = conn
         .execute_update(&format!(
             "INSERT INTO {}.users (id, name, email, age) VALUES (1, 'Alice', 'alice@example.com', 30)",
@@ -701,22 +567,20 @@ async fn test_insert_single_row() {
     );
     assert_eq!(insert_result.unwrap(), 1, "INSERT should affect 1 row");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 5.2 Test INSERT multiple rows
+/// 5.2 INSERT multiple rows over WebSocket.
 #[tokio::test]
-async fn test_insert_multiple_rows() {
+async fn test_ws_insert_multiple_rows() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert multiple rows
     let insert_result = conn
         .execute_update(&format!(
             r#"
@@ -736,22 +600,20 @@ async fn test_insert_multiple_rows() {
     );
     assert_eq!(insert_result.unwrap(), 3, "INSERT should affect 3 rows");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 5.3 Test SELECT to verify inserted data
+/// 5.3 SELECT to verify inserted data over WebSocket.
 #[tokio::test]
-async fn test_select_inserted_data() {
+async fn test_ws_select_inserted_data() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert data
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.users (id, name, email, age) VALUES
@@ -763,7 +625,6 @@ async fn test_select_inserted_data() {
     .await
     .expect("INSERT should succeed");
 
-    // Select and verify
     let batches = conn
         .query(&format!(
             "SELECT id, name, email, age FROM {}.users ORDER BY id",
@@ -778,27 +639,24 @@ async fn test_select_inserted_data() {
     assert_eq!(batch.num_rows(), 2, "Should have 2 rows");
     assert_eq!(batch.num_columns(), 4, "Should have 4 columns");
 
-    // Verify column names
     let schema = batch.schema();
     let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(field_names, vec!["ID", "NAME", "EMAIL", "AGE"]);
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 5.4 Test UPDATE row and verify changes
+/// 5.4 UPDATE row over WebSocket.
 #[tokio::test]
-async fn test_update_row() {
+async fn test_ws_update_row() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert data
     conn.execute_update(&format!(
         "INSERT INTO {}.users (id, name, email, age) VALUES (1, 'Alice', 'alice@example.com', 30)",
         schema_name
@@ -806,7 +664,6 @@ async fn test_update_row() {
     .await
     .expect("INSERT should succeed");
 
-    // Update the row
     let update_result = conn
         .execute_update(&format!(
             "UPDATE {}.users SET age = 31, email = 'alice.new@example.com' WHERE id = 1",
@@ -821,7 +678,6 @@ async fn test_update_row() {
     );
     assert_eq!(update_result.unwrap(), 1, "UPDATE should affect 1 row");
 
-    // Verify the update
     let batches = conn
         .query(&format!(
             "SELECT age, email FROM {}.users WHERE id = 1",
@@ -833,22 +689,20 @@ async fn test_update_row() {
     assert!(!batches.is_empty(), "Should return results");
     assert_eq!(batches[0].num_rows(), 1, "Should have 1 row");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 5.5 Test DELETE row and verify removal
+/// 5.5 DELETE row over WebSocket.
 #[tokio::test]
-async fn test_delete_row() {
+async fn test_ws_delete_row() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert data
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.users (id, name, email, age) VALUES
@@ -860,7 +714,6 @@ async fn test_delete_row() {
     .await
     .expect("INSERT should succeed");
 
-    // Delete one row
     let delete_result = conn
         .execute_update(&format!("DELETE FROM {}.users WHERE id = 1", schema_name))
         .await;
@@ -872,7 +725,6 @@ async fn test_delete_row() {
     );
     assert_eq!(delete_result.unwrap(), 1, "DELETE should affect 1 row");
 
-    // Verify deletion
     let batches = conn
         .query(&format!(
             "SELECT COUNT(*) AS cnt FROM {}.users",
@@ -884,28 +736,24 @@ async fn test_delete_row() {
     assert!(!batches.is_empty(), "Should return results");
     assert_eq!(batches[0].num_rows(), 1, "Should have 1 row");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 6: Transaction Integration Tests
-// Tests for transaction begin, commit, rollback, and auto-commit behavior.
+// ── Section 6: Transactions ───────────────────────────────────────────────────
 
-/// 6.1 Test explicit transaction begin
+/// 6.1 Transaction begin over WebSocket.
 #[tokio::test]
-async fn test_transaction_begin() {
+async fn test_ws_transaction_begin() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
-    // Verify not in transaction initially
     assert!(
         !conn.in_transaction(),
         "Should not be in transaction initially"
     );
 
-    // Begin transaction
     let begin_result = conn.begin_transaction().await;
     assert!(
         begin_result.is_ok(),
@@ -913,34 +761,30 @@ async fn test_transaction_begin() {
         begin_result.err()
     );
 
-    // Verify now in transaction
     assert!(
         conn.in_transaction(),
         "Should be in transaction after BEGIN"
     );
 
-    // Rollback to clean up (don't leave open transaction)
     conn.rollback().await.expect("ROLLBACK should succeed");
 
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 6.2 Test COMMIT makes changes permanent
+/// 6.2 COMMIT makes changes permanent over WebSocket.
 #[tokio::test]
-async fn test_transaction_commit() {
+async fn test_ws_transaction_commit() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Begin transaction
     conn.begin_transaction()
         .await
         .expect("BEGIN should succeed");
 
-    // Insert data
     conn.execute_update(&format!(
         "INSERT INTO {}.users (id, name, email, age) VALUES (1, 'Alice', 'alice@example.com', 30)",
         schema_name
@@ -948,7 +792,6 @@ async fn test_transaction_commit() {
     .await
     .expect("INSERT should succeed");
 
-    // Commit
     let commit_result = conn.commit().await;
     assert!(
         commit_result.is_ok(),
@@ -956,14 +799,12 @@ async fn test_transaction_commit() {
         commit_result.err()
     );
 
-    // Verify not in transaction after commit
     assert!(
         !conn.in_transaction(),
         "Should not be in transaction after COMMIT"
     );
 
-    // Verify data persists (create new connection to be sure)
-    let mut conn2 = get_test_connection()
+    let mut conn2 = get_ws_connection()
         .await
         .expect("Failed to connect second connection");
 
@@ -977,23 +818,21 @@ async fn test_transaction_commit() {
 
     assert!(!batches.is_empty(), "Should return results");
 
-    // Cleanup
-    cleanup_schema(&mut conn2, &schema_name).await;
+    ws_cleanup_schema(&mut conn2, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
     conn2.close().await.expect("Failed to close connection 2");
 }
 
-/// 6.3 Test ROLLBACK discards changes
+/// 6.3 ROLLBACK discards changes over WebSocket.
 #[tokio::test]
-async fn test_transaction_rollback() {
+async fn test_ws_transaction_rollback() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert initial data and commit
     conn.execute_update(&format!(
         "INSERT INTO {}.users (id, name, email, age) VALUES (1, 'Alice', 'alice@example.com', 30)",
         schema_name
@@ -1001,12 +840,10 @@ async fn test_transaction_rollback() {
     .await
     .expect("Initial INSERT should succeed");
 
-    // Begin new transaction
     conn.begin_transaction()
         .await
         .expect("BEGIN should succeed");
 
-    // Insert more data
     conn.execute_update(&format!(
         "INSERT INTO {}.users (id, name, email, age) VALUES (2, 'Bob', 'bob@example.com', 25)",
         schema_name
@@ -1014,7 +851,6 @@ async fn test_transaction_rollback() {
     .await
     .expect("Second INSERT should succeed");
 
-    // Rollback
     let rollback_result = conn.rollback().await;
     assert!(
         rollback_result.is_ok(),
@@ -1022,13 +858,11 @@ async fn test_transaction_rollback() {
         rollback_result.err()
     );
 
-    // Verify not in transaction after rollback
     assert!(
         !conn.in_transaction(),
         "Should not be in transaction after ROLLBACK"
     );
 
-    // Verify only first row exists (second was rolled back)
     let batches = conn
         .query(&format!(
             "SELECT COUNT(*) AS cnt FROM {}.users",
@@ -1038,25 +872,21 @@ async fn test_transaction_rollback() {
         .expect("SELECT should succeed");
 
     assert!(!batches.is_empty(), "Should return results");
-    // Note: Due to auto-commit behavior, the first insert was already committed
-    // so we should have 1 row
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 6.4 Verify auto-commit default behavior
+/// 6.4 Auto-commit default behavior over WebSocket.
 #[tokio::test]
-async fn test_auto_commit_behavior() {
+async fn test_ws_auto_commit_behavior() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
-    setup_dml_test_table(&mut conn, &schema_name).await;
+    ws_setup_dml_test_table(&mut conn, &schema_name).await;
 
-    // Insert without explicit transaction (auto-commit mode)
     conn.execute_update(&format!(
         "INSERT INTO {}.users (id, name, email, age) VALUES (1, 'Alice', 'alice@example.com', 30)",
         schema_name
@@ -1064,14 +894,12 @@ async fn test_auto_commit_behavior() {
     .await
     .expect("INSERT should succeed");
 
-    // Verify not in transaction (auto-commit should have committed)
     assert!(
         !conn.in_transaction(),
         "Should not be in transaction in auto-commit mode"
     );
 
-    // Create new connection to verify data was committed
-    let mut conn2 = get_test_connection()
+    let mut conn2 = get_ws_connection()
         .await
         .expect("Failed to connect second connection");
 
@@ -1085,25 +913,22 @@ async fn test_auto_commit_behavior() {
 
     assert!(!batches.is_empty(), "Should return results");
 
-    // Cleanup
-    cleanup_schema(&mut conn2, &schema_name).await;
+    ws_cleanup_schema(&mut conn2, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
     conn2.close().await.expect("Failed to close connection 2");
 }
 
-// Section 7: Arrow Conversion Validation
-// Tests for verifying correct conversion of Exasol types to Arrow types.
+// ── Section 7: Arrow Conversion ───────────────────────────────────────────────
 
-/// 7.1 Test INTEGER type conversion to Arrow Int64
+/// 7.1 INTEGER to Arrow Int64 over WebSocket.
 #[tokio::test]
-async fn test_integer_to_arrow_int64() {
+async fn test_ws_integer_to_arrow_int64() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Create schema and table
     conn.execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await
         .expect("CREATE SCHEMA should succeed");
@@ -1115,8 +940,6 @@ async fn test_integer_to_arrow_int64() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert test data including edge cases
-    // Note: DECIMAL(18,0) max is 999999999999999999 (18 digits), not INT64_MAX
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.int_test VALUES
@@ -1131,7 +954,6 @@ async fn test_integer_to_arrow_int64() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT small_int, big_int FROM {}.int_test ORDER BY small_int",
@@ -1145,7 +967,6 @@ async fn test_integer_to_arrow_int64() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 5, "Should have 5 rows");
 
-    // Verify data types are numeric
     let schema = batch.schema();
     for field in schema.fields() {
         let dt = field.data_type();
@@ -1159,17 +980,16 @@ async fn test_integer_to_arrow_int64() {
         );
     }
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 7.2 Test VARCHAR type conversion to Arrow Utf8
+/// 7.2 VARCHAR to Arrow Utf8 over WebSocket.
 #[tokio::test]
-async fn test_varchar_to_arrow_utf8() {
+async fn test_ws_varchar_to_arrow_utf8() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1184,7 +1004,6 @@ async fn test_varchar_to_arrow_utf8() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert test data
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.varchar_test VALUES
@@ -1197,7 +1016,6 @@ async fn test_varchar_to_arrow_utf8() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT short_text, long_text FROM {}.varchar_test",
@@ -1211,7 +1029,6 @@ async fn test_varchar_to_arrow_utf8() {
     let batch = &batches[0];
     let schema = batch.schema();
 
-    // Verify both columns are Utf8
     for field in schema.fields() {
         assert!(
             matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8),
@@ -1220,7 +1037,6 @@ async fn test_varchar_to_arrow_utf8() {
         );
     }
 
-    // Access string values using StringArray
     let short_text_col = batch.column(0);
     let string_array = short_text_col
         .as_any()
@@ -1232,17 +1048,16 @@ async fn test_varchar_to_arrow_utf8() {
     assert_eq!(string_array.value(1), "Test");
     assert_eq!(string_array.value(2), "Unicode");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 7.3 Test DECIMAL type conversion with precision/scale
+/// 7.3 DECIMAL type conversion over WebSocket.
 #[tokio::test]
-async fn test_decimal_type_conversion() {
+async fn test_ws_decimal_type_conversion() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1257,7 +1072,6 @@ async fn test_decimal_type_conversion() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert test data
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.decimal_test VALUES
@@ -1270,7 +1084,6 @@ async fn test_decimal_type_conversion() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT price, quantity FROM {}.decimal_test ORDER BY price",
@@ -1284,7 +1097,6 @@ async fn test_decimal_type_conversion() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 3, "Should have 3 rows");
 
-    // Verify schema types
     let schema = batch.schema();
     for field in schema.fields() {
         let dt = field.data_type();
@@ -1295,17 +1107,16 @@ async fn test_decimal_type_conversion() {
         );
     }
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 7.4 Test NULL value handling in result sets
+/// 7.4 NULL value handling over WebSocket.
 #[tokio::test]
-async fn test_null_value_handling() {
+async fn test_ws_null_value_handling() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1327,7 +1138,6 @@ async fn test_null_value_handling() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert rows with NULL values
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.null_test VALUES
@@ -1340,7 +1150,6 @@ async fn test_null_value_handling() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT id, nullable_int, nullable_varchar, nullable_decimal FROM {}.null_test ORDER BY id",
@@ -1354,12 +1163,10 @@ async fn test_null_value_handling() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 3, "Should have 3 rows");
 
-    // Check null counts for each column
     let nullable_int_col = batch.column(1);
     let nullable_varchar_col = batch.column(2);
     let nullable_decimal_col = batch.column(3);
 
-    // Verify null values are present
     assert_eq!(
         nullable_int_col.null_count(),
         2,
@@ -1376,17 +1183,16 @@ async fn test_null_value_handling() {
         "nullable_decimal should have 2 nulls"
     );
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 7.5 Test DATE/TIMESTAMP type conversion
+/// 7.5 DATE/TIMESTAMP type conversion over WebSocket.
 #[tokio::test]
-async fn test_date_timestamp_conversion() {
+async fn test_ws_date_timestamp_conversion() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1406,7 +1212,6 @@ async fn test_date_timestamp_conversion() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert test data
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.datetime_test VALUES
@@ -1419,7 +1224,6 @@ async fn test_date_timestamp_conversion() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT event_date, event_timestamp FROM {}.datetime_test ORDER BY event_date",
@@ -1433,7 +1237,6 @@ async fn test_date_timestamp_conversion() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 3, "Should have 3 rows");
 
-    // Verify schema types
     let schema = batch.schema();
 
     let date_field = schema.field(0);
@@ -1456,19 +1259,16 @@ async fn test_date_timestamp_conversion() {
         timestamp_field.data_type()
     );
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-// Additional Arrow Validation Tests
-
-/// Test BOOLEAN type conversion
+/// BOOLEAN type conversion over WebSocket.
 #[tokio::test]
-async fn test_boolean_type_conversion() {
+async fn test_ws_boolean_type_conversion() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1513,7 +1313,6 @@ async fn test_boolean_type_conversion() {
         "BOOLEAN column should be Arrow Boolean type"
     );
 
-    // Verify values using BooleanArray
     let bool_col = batch.column(0);
     let bool_array = bool_col
         .as_any()
@@ -1524,17 +1323,16 @@ async fn test_boolean_type_conversion() {
     assert!(!bool_array.value(1), "Second value should be false");
     assert!(bool_array.is_null(2), "Third value should be null");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// Test DOUBLE type conversion
+/// DOUBLE type conversion over WebSocket.
 #[tokio::test]
-async fn test_double_type_conversion() {
+async fn test_ws_double_type_conversion() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1583,7 +1381,6 @@ async fn test_double_type_conversion() {
         "DOUBLE column should be Arrow Float64 type"
     );
 
-    // Verify values using Float64Array
     let double_col = batch.column(0);
     let float_array = double_col
         .as_any()
@@ -1591,23 +1388,21 @@ async fn test_double_type_conversion() {
         .expect("Should be Float64Array");
 
     assert_eq!(float_array.len(), 4, "Should have 4 values");
-    // Values are ordered, so first is the most negative
     assert!(
         float_array.value(0) < 0.0,
         "First value should be negative (ordered)"
     );
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// Test large result set handling
+/// Large result set (1000 rows) over WebSocket.
 #[tokio::test]
-async fn test_large_result_set() {
+async fn test_ws_large_result_set() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1622,7 +1417,6 @@ async fn test_large_result_set() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert 1000 rows using a sequence
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.large_test (id, text_data)
@@ -1635,7 +1429,6 @@ async fn test_large_result_set() {
     .await
     .expect("INSERT should succeed");
 
-    // Query and verify
     let batches = conn
         .query(&format!(
             "SELECT COUNT(*) AS cnt FROM {}.large_test",
@@ -1646,7 +1439,6 @@ async fn test_large_result_set() {
 
     assert!(!batches.is_empty(), "Should return results");
 
-    // Query all rows
     let all_batches = conn
         .query(&format!(
             "SELECT id, text_data FROM {}.large_test ORDER BY id",
@@ -1655,21 +1447,19 @@ async fn test_large_result_set() {
         .await
         .expect("SELECT all should succeed");
 
-    // Count total rows across all batches
     let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 1000, "Should have 1000 total rows");
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-/// Test empty result set handling
+/// Empty result set over WebSocket.
 #[tokio::test]
-async fn test_empty_result_set() {
+async fn test_ws_empty_result_set() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1684,39 +1474,32 @@ async fn test_empty_result_set() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Query empty table
     let batches = conn
         .query(&format!("SELECT id, name FROM {}.empty_test", schema_name))
         .await
         .expect("SELECT from empty table should succeed");
 
-    // Empty table should return valid batches with 0 rows
-    // The total row count across all batches should be 0
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 0, "Empty table should return 0 rows");
 
-    // But schema should still be present
     if !batches.is_empty() {
         let schema = batches[0].schema();
         assert_eq!(schema.fields().len(), 2, "Schema should have 2 fields");
     }
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 8: Prepared Statement Integration Tests
-// Tests for prepared statement lifecycle, parameter binding, and execution.
+// ── Section 8: Prepared Statements ───────────────────────────────────────────
 
-/// 8.1 Test creating and closing a prepared statement
+/// 8.1 Prepared statement lifecycle over WebSocket.
 #[tokio::test]
-async fn test_prepared_statement_lifecycle() {
+async fn test_ws_prepared_statement_lifecycle() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
-    // Create a simple prepared statement using new Connection::prepare API
     let prepared = conn
         .prepare("SELECT 1")
         .await
@@ -1725,18 +1508,15 @@ async fn test_prepared_statement_lifecycle() {
     assert!(!prepared.is_closed());
     assert_eq!(prepared.parameter_count(), 0);
 
-    // Execute without parameters using Connection::execute_prepared
     let results = conn
         .execute_prepared(&prepared)
         .await
         .expect("Failed to execute prepared statement");
 
-    // Verify we got results
     let batches = results.fetch_all().await.expect("Failed to fetch results");
     assert!(!batches.is_empty(), "Should return at least one batch");
     assert_eq!(batches[0].num_rows(), 1, "Should return 1 row");
 
-    // Close the prepared statement using Connection::close_prepared
     conn.close_prepared(prepared)
         .await
         .expect("Failed to close prepared statement");
@@ -1744,16 +1524,15 @@ async fn test_prepared_statement_lifecycle() {
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 8.2 Test prepared statement with parameters (INSERT)
+/// 8.2 Prepared statement with parameters (INSERT) over WebSocket.
 #[tokio::test]
-async fn test_prepared_statement_with_parameters() {
+async fn test_ws_prepared_statement_with_parameters() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Setup: create schema and table
     let _ = conn
         .execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await;
@@ -1764,7 +1543,6 @@ async fn test_prepared_statement_with_parameters() {
     .await
     .expect("Failed to create table");
 
-    // Insert using prepared statement with new Connection::prepare API
     let mut prepared = conn
         .prepare(&format!(
             "INSERT INTO {}.test_params VALUES (?, ?)",
@@ -1775,7 +1553,6 @@ async fn test_prepared_statement_with_parameters() {
 
     assert_eq!(prepared.parameter_count(), 2);
 
-    // Bind and execute using Connection::execute_prepared_update
     prepared.bind(0, 1).expect("Failed to bind param 0");
     prepared.bind(1, "Alice").expect("Failed to bind param 1");
     let rows = conn
@@ -1785,7 +1562,6 @@ async fn test_prepared_statement_with_parameters() {
 
     assert_eq!(rows, 1);
 
-    // Re-bind and execute again
     prepared.clear_parameters();
     prepared.bind(0, 2).expect("Failed to bind param 0");
     prepared.bind(1, "Bob").expect("Failed to bind param 1");
@@ -1800,7 +1576,6 @@ async fn test_prepared_statement_with_parameters() {
         .await
         .expect("Failed to close prepared");
 
-    // Verify data was inserted
     let batches = conn
         .query(&format!(
             "SELECT id, name FROM {}.test_params ORDER BY id",
@@ -1812,23 +1587,21 @@ async fn test_prepared_statement_with_parameters() {
     assert!(!batches.is_empty(), "Should return results");
     assert_eq!(batches[0].num_rows(), 2);
 
-    // Cleanup
     conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
         .await
         .expect("Failed to drop schema");
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 8.3 Test prepared statement with SELECT and parameters
+/// 8.3 Prepared SELECT with parameters over WebSocket.
 #[tokio::test]
-async fn test_prepared_select_with_parameters() {
+async fn test_ws_prepared_select_with_parameters() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Setup
     let _ = conn
         .execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await;
@@ -1839,7 +1612,6 @@ async fn test_prepared_select_with_parameters() {
     .await
     .expect("Failed to create table");
 
-    // Insert test data
     conn.execute_update(&format!(
         "INSERT INTO {}.test_select VALUES (1, 100), (2, 200), (3, 300)",
         schema_name
@@ -1847,7 +1619,6 @@ async fn test_prepared_select_with_parameters() {
     .await
     .expect("Failed to insert data");
 
-    // Select with parameter using new Connection::prepare API
     let mut prepared = conn
         .prepare(&format!(
             "SELECT val FROM {}.test_select WHERE id = ?",
@@ -1856,7 +1627,6 @@ async fn test_prepared_select_with_parameters() {
         .await
         .expect("Failed to prepare select");
 
-    // Query for id = 2
     prepared.bind(0, 2).expect("Failed to bind param");
     let results = conn
         .execute_prepared(&prepared)
@@ -1867,7 +1637,6 @@ async fn test_prepared_select_with_parameters() {
     assert!(!batches.is_empty(), "Should return results");
     assert_eq!(batches[0].num_rows(), 1);
 
-    // Query for id = 3 (reuse prepared statement)
     prepared.clear_parameters();
     prepared.bind(0, 3).expect("Failed to bind param");
     let results = conn
@@ -1883,24 +1652,22 @@ async fn test_prepared_select_with_parameters() {
         .await
         .expect("Failed to close prepared");
 
-    // Cleanup
     conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
         .await
         .expect("Failed to drop schema");
     conn.close().await.expect("Failed to close connection");
 }
 
-/// 8.4 Test prepared statement parameter types
+/// 8.4 Prepared statement parameter types over WebSocket.
 #[allow(clippy::approx_constant)]
 #[tokio::test]
-async fn test_prepared_statement_parameter_types() {
+async fn test_ws_prepared_statement_parameter_types() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
-    // Setup
     let _ = conn
         .execute_update(&format!("CREATE SCHEMA {}", schema_name))
         .await;
@@ -1916,7 +1683,6 @@ async fn test_prepared_statement_parameter_types() {
     .await
     .expect("Failed to create table");
 
-    // Insert using prepared statement with various types using new Connection::prepare API
     let mut prepared = conn
         .prepare(&format!(
             "INSERT INTO {}.test_types VALUES (?, ?, ?, ?)",
@@ -1940,7 +1706,6 @@ async fn test_prepared_statement_parameter_types() {
         .await
         .expect("Failed to close");
 
-    // Verify
     let batches = conn
         .query(&format!("SELECT * FROM {}.test_types", schema_name))
         .await
@@ -1949,26 +1714,20 @@ async fn test_prepared_statement_parameter_types() {
     assert!(!batches.is_empty(), "Should return results");
     assert_eq!(batches[0].num_rows(), 1);
 
-    // Cleanup
     conn.execute_update(&format!("DROP SCHEMA {} CASCADE", schema_name))
         .await
         .expect("Failed to drop schema");
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section 9: WebSocket Transport Regression Tests
+// ── Section 9: WebSocket Regression ──────────────────────────────────────────
 
-/// 9.1 Regression test for GitHub issue #18: large result sets exceeding the
-/// default 16 MiB WebSocket frame limit.
-///
-/// Creates a wide table with 5 VARCHAR columns, inserts 20,000 rows
-/// (~1 KB each via 200-char fills, total ~20 MB exceeding the 16 MiB default
-/// frame limit), queries all rows, and asserts the full row count is returned.
+/// Large result set exceeding default 16 MiB WebSocket frame limit, over WebSocket.
 #[tokio::test]
-async fn test_large_result_set_exceeds_default_frame_limit() {
+async fn test_ws_large_result_set_exceeds_default_frame_limit() {
     skip_if_no_exasol!();
 
-    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let mut conn = get_ws_connection().await.expect("Failed to connect");
 
     let schema_name = generate_test_schema_name();
 
@@ -1976,7 +1735,6 @@ async fn test_large_result_set_exceeds_default_frame_limit() {
         .await
         .expect("CREATE SCHEMA should succeed");
 
-    // Create a wide table with multiple VARCHAR(1000) columns to get ~1 KB per row
     conn.execute_update(&format!(
         "CREATE TABLE {}.wide_test (
             id INTEGER,
@@ -1991,8 +1749,6 @@ async fn test_large_result_set_exceeds_default_frame_limit() {
     .await
     .expect("CREATE TABLE should succeed");
 
-    // Insert 20,000 rows of ~1 KB each using CONNECT BY LEVEL
-    // Total data size: ~20,000 * 1 KB = ~20 MB, exceeding the 16 MiB default frame limit
     conn.execute_update(&format!(
         r#"
         INSERT INTO {}.wide_test (id, col1, col2, col3, col4, col5)
@@ -2011,7 +1767,6 @@ async fn test_large_result_set_exceeds_default_frame_limit() {
     .await
     .expect("INSERT should succeed");
 
-    // Query all rows - this should trigger a large WebSocket frame
     let all_batches = conn
         .query(&format!(
             "SELECT id, col1, col2, col3, col4, col5 FROM {}.wide_test",
@@ -2020,35 +1775,32 @@ async fn test_large_result_set_exceeds_default_frame_limit() {
         .await
         .expect("SELECT all rows should succeed (must handle frames > 16 MiB)");
 
-    // Count total rows across all batches
     let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
         total_rows, 20000,
         "Should have all 20,000 rows returned despite large frame size"
     );
 
-    // Cleanup
-    cleanup_schema(&mut conn, &schema_name).await;
+    ws_cleanup_schema(&mut conn, &schema_name).await;
     conn.close().await.expect("Failed to close connection");
 }
 
-// Section: Certificate Fingerprint Tests
+// ── Certificate fingerprint tests ────────────────────────────────────────────
 
-/// Connects with a wrong fingerprint and verifies the error contains the actual SHA-256 hex
-/// fingerprint (64 hex chars).
+/// Connect with wrong fingerprint over WebSocket — error should expose the actual fingerprint.
 #[tokio::test]
-async fn test_connect_with_wrong_fingerprint_fails() {
+async fn test_ws_connect_with_wrong_fingerprint_fails() {
     skip_if_no_exasol!();
 
     let conn_str = format!(
-        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=0000000000000000000000000000000000000000000000000000000000000000",
-        common::get_user(),
-        common::get_password(),
-        common::get_host(),
-        common::get_port(),
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=0000000000000000000000000000000000000000000000000000000000000000&transport=websocket",
+        get_user(),
+        get_password(),
+        get_host(),
+        get_port(),
     );
 
-    let driver = exarrow_rs::adbc::Driver::new();
+    let driver = Driver::new();
     let database = driver.open(&conn_str).expect("open should succeed");
     let result = database.connect().await;
 
@@ -2058,7 +1810,6 @@ async fn test_connect_with_wrong_fingerprint_fails() {
     );
 
     let err_msg = result.unwrap_err().to_string();
-    // The error message should contain the actual 64-char SHA-256 hex fingerprint
     let hex_chars: String = err_msg.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     assert!(
         hex_chars.len() >= 64,
@@ -2067,22 +1818,20 @@ async fn test_connect_with_wrong_fingerprint_fails() {
     );
 }
 
-/// Connects with a placeholder fingerprint to discover the actual fingerprint, then reconnects
-/// using the actual fingerprint to verify successful pinned connection.
+/// Connect with a discovered certificate fingerprint over WebSocket.
 #[tokio::test]
-async fn test_connect_with_certificate_fingerprint() {
+async fn test_ws_connect_with_certificate_fingerprint() {
     skip_if_no_exasol!();
 
-    // Step 1: Connect with a wrong fingerprint to discover the actual fingerprint
     let conn_str_wrong = format!(
-        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=placeholder",
-        common::get_user(),
-        common::get_password(),
-        common::get_host(),
-        common::get_port(),
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint=placeholder&transport=websocket",
+        get_user(),
+        get_password(),
+        get_host(),
+        get_port(),
     );
 
-    let driver = exarrow_rs::adbc::Driver::new();
+    let driver = Driver::new();
     let database = driver.open(&conn_str_wrong).expect("open should succeed");
     let result = database.connect().await;
 
@@ -2093,7 +1842,6 @@ async fn test_connect_with_certificate_fingerprint() {
 
     let err_msg = result.unwrap_err().to_string();
 
-    // Extract the actual fingerprint from the error message ("got <fingerprint>")
     let actual_fingerprint = err_msg
         .split("got ")
         .nth(1)
@@ -2107,13 +1855,12 @@ async fn test_connect_with_certificate_fingerprint() {
         actual_fingerprint
     );
 
-    // Step 2: Reconnect using the discovered fingerprint — should succeed
     let conn_str_pinned = format!(
-        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint={}",
-        common::get_user(),
-        common::get_password(),
-        common::get_host(),
-        common::get_port(),
+        "exasol://{}:{}@{}:{}?tls=true&certificate_fingerprint={}&transport=websocket",
+        get_user(),
+        get_password(),
+        get_host(),
+        get_port(),
         actual_fingerprint,
     );
 

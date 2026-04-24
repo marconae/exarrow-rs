@@ -2328,8 +2328,9 @@ impl adbc_core::Statement for FfiStatement {
                 .parameter_names
                 .get(i)
                 .and_then(|n| n.as_deref())
+                .filter(|name| !name.is_empty())
                 .map(String::from)
-                .unwrap_or_else(|| format!("param_{}", i));
+                .unwrap_or_else(|| format!("parameter_{}", i + 1));
             fields.push(Field::new(name, arrow_type, true));
         }
 

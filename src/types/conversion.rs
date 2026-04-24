@@ -70,6 +70,57 @@ pub fn parse_date_to_days(date_str: &str) -> Result<i32, String> {
     Ok(days_from_year + days_from_month + day as i32 - 1 + leap_adjustment)
 }
 
+/// Converts a year/month/day triple directly to days since Unix epoch (1970-01-01).
+///
+/// Uses the same arithmetic as `parse_date_to_days` but skips string parsing
+/// and validation; callers that have already decoded the components should
+/// prefer this function on hot paths.
+pub fn ymd_to_days(year: i32, month: u32, day: u32) -> i32 {
+    let days_from_year =
+        (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
+
+    let days_from_month = match month {
+        1 => 0,
+        2 => 31,
+        3 => 59,
+        4 => 90,
+        5 => 120,
+        6 => 151,
+        7 => 181,
+        8 => 212,
+        9 => 243,
+        10 => 273,
+        11 => 304,
+        12 => 334,
+        _ => 0,
+    };
+
+    let is_leap_year = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let leap_adjustment = if month > 2 && is_leap_year { 1 } else { 0 };
+
+    days_from_year + days_from_month + day as i32 - 1 + leap_adjustment
+}
+
+/// Converts a pre-decoded timestamp (y, m, d, h, min, s, nanos) to microseconds
+/// since Unix epoch. Nanoseconds are truncated to microsecond precision.
+pub fn ymd_hms_nanos_to_micros(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u64,
+    minute: u64,
+    second: u64,
+    nanos: i32,
+) -> i64 {
+    let days = ymd_to_days(year, month, day);
+    let mut micros = days as i64 * 86_400 * 1_000_000;
+    micros += hour as i64 * 3_600 * 1_000_000;
+    micros += minute as i64 * 60 * 1_000_000;
+    micros += second as i64 * 1_000_000;
+    micros += nanos as i64 / 1_000;
+    micros
+}
+
 /// Parses a timestamp string to microseconds since Unix epoch.
 ///
 /// Supports formats:
@@ -306,6 +357,80 @@ mod tests {
         // .123 should be interpreted as 123000 microseconds
         let micros = parse_timestamp_to_micros("1970-01-01 00:00:00.123").unwrap();
         assert_eq!(micros, 123000);
+    }
+
+    // Tests for ymd_to_days
+
+    #[test]
+    fn test_ymd_to_days_unix_epoch() {
+        assert_eq!(ymd_to_days(1970, 1, 1), 0);
+    }
+
+    #[test]
+    fn test_ymd_to_days_matches_string_parser() {
+        for date in &[
+            "1970-01-01",
+            "1969-12-31",
+            "2024-02-29",
+            "2000-02-29",
+            "1900-03-01",
+            "2024-01-01",
+            "2100-03-01",
+            "2023-12-31",
+            "1601-01-01",
+        ] {
+            let parts: Vec<&str> = date.split('-').collect();
+            let y: i32 = parts[0].parse().unwrap();
+            let m: u32 = parts[1].parse().unwrap();
+            let d: u32 = parts[2].parse().unwrap();
+            assert_eq!(
+                ymd_to_days(y, m, d),
+                parse_date_to_days(date).unwrap(),
+                "mismatch for {}",
+                date
+            );
+        }
+    }
+
+    #[test]
+    fn test_ymd_to_days_leap_year_after_feb() {
+        // 2024 is a leap year; March 1 2024 is one day later than a non-leap year would be
+        let leap_mar1 = ymd_to_days(2024, 3, 1);
+        let non_leap_mar1 = ymd_to_days(2023, 3, 1);
+        assert_eq!(leap_mar1 - non_leap_mar1, 366);
+    }
+
+    // Tests for ymd_hms_nanos_to_micros
+
+    #[test]
+    fn test_ymd_hms_nanos_to_micros_epoch() {
+        assert_eq!(ymd_hms_nanos_to_micros(1970, 1, 1, 0, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_ymd_hms_nanos_to_micros_with_time() {
+        let micros = ymd_hms_nanos_to_micros(1970, 1, 1, 1, 0, 0, 0);
+        assert_eq!(micros, 3600 * 1_000_000);
+    }
+
+    #[test]
+    fn test_ymd_hms_nanos_to_micros_sub_second_precision() {
+        // 123456789 nanos → 123456 micros (truncated)
+        let micros = ymd_hms_nanos_to_micros(1970, 1, 1, 0, 0, 0, 123_456_789);
+        assert_eq!(micros, 123_456);
+    }
+
+    #[test]
+    fn test_ymd_hms_nanos_to_micros_full_timestamp() {
+        // 2024-01-02 03:04:05.678 → known value
+        let micros = ymd_hms_nanos_to_micros(2024, 1, 2, 3, 4, 5, 678_000_000);
+        let days = ymd_to_days(2024, 1, 2) as i64;
+        let expected = days * 86_400 * 1_000_000
+            + 3 * 3_600 * 1_000_000
+            + 4 * 60 * 1_000_000
+            + 5 * 1_000_000
+            + 678_000;
+        assert_eq!(micros, expected);
     }
 
     // Tests for parse_decimal_to_i128

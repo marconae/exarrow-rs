@@ -47,6 +47,10 @@ struct Args {
     /// Output JSON file
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Transport protocol to use (native or websocket)
+    #[arg(long, default_value = "native")]
+    transport: String,
 }
 
 /// Connection configuration from environment
@@ -77,11 +81,19 @@ impl Config {
     }
 }
 
-async fn connect(config: &Config) -> Result<Connection, Box<dyn std::error::Error>> {
+async fn connect(
+    config: &Config,
+    transport: &str,
+) -> Result<Connection, Box<dyn std::error::Error>> {
     let driver = Driver::new();
     let conn_string = format!(
-        "exasol://{}:{}@{}:{}?tls=1&validateservercertificate={}",
-        config.user, config.password, config.host, config.port, config.validate_cert as u8
+        "exasol://{}:{}@{}:{}?tls=1&validateservercertificate={}&transport={}",
+        config.user,
+        config.password,
+        config.host,
+        config.port,
+        config.validate_cert as u8,
+        transport
     );
     let database = driver.open(&conn_string)?;
     let connection = database.connect().await?;
@@ -160,34 +172,7 @@ async fn select_to_polars(
 ) -> Result<(i64, f64, DataFrame), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
-    // Query data in batches to avoid message size limits
-    let batch_size = 50_000;
-    let mut offset = 0i64;
-    let mut all_batches = Vec::new();
-
-    loop {
-        let sql = format!(
-            "SELECT * FROM benchmark.benchmark_data ORDER BY id LIMIT {} OFFSET {}",
-            batch_size, offset
-        );
-        let batches = conn.query(&sql).await?;
-
-        if batches.is_empty() {
-            break;
-        }
-
-        let batch_rows: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
-        if batch_rows == 0 {
-            break;
-        }
-
-        all_batches.extend(batches);
-        offset += batch_rows;
-
-        if batch_rows < batch_size as i64 {
-            break;
-        }
-    }
+    let all_batches = conn.query("SELECT * FROM benchmark.benchmark_data").await?;
 
     if all_batches.is_empty() {
         return Err("No data returned".into());
@@ -333,7 +318,7 @@ async fn run_import_benchmark_main(
     println!("  File: {} ({:.2} MB)", file_path.display(), file_size_mb);
     println!();
 
-    let mut conn = connect(config).await?;
+    let mut conn = connect(config, &args.transport).await?;
     setup_table(&mut conn).await?;
 
     let (times, total_rows) = run_import_benchmark(
@@ -398,7 +383,7 @@ async fn run_select_polars_benchmark_main(
     println!("  Note: Data must already exist from prior import benchmark");
     println!();
 
-    let mut conn = connect(config).await?;
+    let mut conn = connect(config, &args.transport).await?;
 
     // Verify data exists
     let result = conn

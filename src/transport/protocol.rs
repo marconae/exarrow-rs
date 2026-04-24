@@ -337,20 +337,10 @@ impl QueryResult {
     }
 
     /// Check if this result has more data to fetch.
-    ///
-    /// For column-major data, the number of rows is determined by the length
-    /// of the first column (or 0 if no columns).
     pub fn has_more_data(&self) -> bool {
         match self {
             Self::ResultSet { handle, data } => {
-                // Has more if there's a handle AND we have fewer rows than total
-                // For column-major data: rows = data[0].len() if data is not empty
-                let num_rows = if data.data.is_empty() {
-                    0
-                } else {
-                    data.data[0].len() as i64
-                };
-                handle.is_some() && num_rows < data.total_rows
+                handle.is_some() && (data.data.num_rows() as i64) < data.total_rows
             }
             _ => false,
         }
@@ -462,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_query_result_result_set() {
-        use super::super::messages::{ColumnInfo, DataType, ResultData};
+        use super::super::messages::{ColumnInfo, DataType, ResultData, ResultPayload};
 
         let data = ResultData {
             columns: vec![ColumnInfo {
@@ -477,7 +467,7 @@ mod tests {
                     fraction: None,
                 },
             }],
-            data: vec![], // Column-major: empty means no rows
+            data: ResultPayload::Json(vec![]),
             total_rows: 0,
         };
 

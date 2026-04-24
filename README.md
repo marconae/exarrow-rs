@@ -44,11 +44,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## Transport
+
+exarrow-rs uses the **native TCP protocol** by default — Exasol's binary wire protocol with direct Arrow conversion and no intermediate JSON serialization. No extra configuration is needed.
+
+The WebSocket transport is available as an opt-in alternative for compatibility or testing:
+
+```toml
+[dependencies]
+exarrow-rs = { version = "0.10", features = ["websocket"] }
+```
+
+```rust
+let db = driver.open("exasol://user:pwd@host:8563?transport=websocket")?;
+```
+
+See [Transport Protocol](docs/setup-and-connect.md#transport-protocol) in the docs for feature flags and build options.
+
+---
+
 ## Documentation
 
 See [**docs/**](docs/index.md) for comprehensive documentation:
 
-- [Setup & Connect](docs/setup-and-connect.md) - Docker setup, connection strings, parameters, and TLS configuration
+- [Setup & Connect](docs/setup-and-connect.md) - Docker setup, connection strings, parameters, TLS, and transport selection
 - [Queries](docs/queries.md) - Query execution and transactions
 - [Prepared Statements](docs/prepared-statements.md) - Parameter binding
 - [Import / Export](docs/import-export.md) - Bulk data transfer

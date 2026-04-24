@@ -19,7 +19,6 @@ use crate::transport::protocol::{
     ConnectionParams as TransportConnectionParams, Credentials as TransportCredentials,
     QueryResult, TransportProtocol,
 };
-use crate::transport::WebSocketTransport;
 use arrow::array::RecordBatch;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -88,9 +87,42 @@ impl Connection {
     ///
     /// Returns `ConnectionError` if the connection or authentication fails.
     pub async fn from_params(params: ConnectionParams) -> Result<Self, ConnectionError> {
-        // Create transport
-        let mut transport = WebSocketTransport::new();
+        let requested = params.transport.as_deref();
 
+        match requested {
+            #[cfg(feature = "native")]
+            Some("native") | None => {
+                let transport = crate::transport::NativeTcpTransport::new();
+                Self::connect_with_transport(params, transport).await
+            }
+            #[cfg(feature = "websocket")]
+            Some("websocket") => {
+                let transport = crate::transport::WebSocketTransport::new();
+                Self::connect_with_transport(params, transport).await
+            }
+            #[cfg(all(not(feature = "native"), feature = "websocket"))]
+            None => {
+                let transport = crate::transport::WebSocketTransport::new();
+                Self::connect_with_transport(params, transport).await
+            }
+            Some(t) => Err(ConnectionError::InvalidParameter {
+                parameter: "transport".to_string(),
+                message: format!("Transport '{}' is not available. Check feature flags.", t),
+            }),
+            #[cfg(not(any(feature = "native", feature = "websocket")))]
+            None => Err(ConnectionError::InvalidParameter {
+                parameter: "transport".to_string(),
+                message: "No transport feature enabled. Enable 'native' or 'websocket'."
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Connect using the given transport implementation.
+    async fn connect_with_transport<T: TransportProtocol + 'static>(
+        params: ConnectionParams,
+        mut transport: T,
+    ) -> Result<Self, ConnectionError> {
         // Convert ConnectionParams to TransportConnectionParams
         let mut transport_params = TransportConnectionParams::new(params.host.clone(), params.port)
             .with_tls(params.use_tls)
@@ -135,14 +167,14 @@ impl Connection {
             database_name: session_info.database_name,
             product_name: session_info.product_name,
             max_data_message_size: session_info.max_data_message_size,
-            max_identifier_length: 128,    // Default value
-            max_varchar_length: 2_000_000, // Default value
+            max_identifier_length: 128,
+            max_varchar_length: 2_000_000,
             identifier_quote_string: "\"".to_string(),
             time_zone: session_info.time_zone.unwrap_or_else(|| "UTC".to_string()),
             time_zone_behavior: "INVALID TIMESTAMP TO DOUBLE".to_string(),
         };
 
-        // Create session (owned, not Arc)
+        // Create session
         let session = SessionInfo::new(session_id, auth_response, session_config);
 
         // Set schema if specified

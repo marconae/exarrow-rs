@@ -7,7 +7,7 @@
 //! the streaming deserializer transposes Exasol's column-major wire format.
 
 use crate::error::ConversionError;
-use crate::transport::messages::{ColumnInfo, ResultData};
+use crate::transport::messages::{ColumnInfo, ResultData, ResultPayload};
 use crate::types::{ExasolType, SchemaBuilder};
 use arrow::array::RecordBatch;
 use arrow::datatypes::Schema;
@@ -93,14 +93,22 @@ impl ArrowConverter {
         &self,
         result_data: &ResultData,
     ) -> Result<RecordBatch, ConversionError> {
-        // Handle empty result set
-        if result_data.data.is_empty() {
+        // If payload is already Arrow, return it directly
+        if let ResultPayload::Arrow(batch) = &result_data.data {
+            return Ok(batch.clone());
+        }
+
+        let rows = match &result_data.data {
+            ResultPayload::Json(rows) => rows,
+            ResultPayload::Arrow(_) => unreachable!(),
+        };
+
+        if rows.is_empty() {
             return Ok(RecordBatch::new_empty(Arc::clone(&self.schema)));
         }
 
-        // Verify column count matches schema (check first row)
         let num_columns = self.column_types.len();
-        if let Some(first_row) = result_data.data.first() {
+        if let Some(first_row) = rows.first() {
             if first_row.len() != num_columns {
                 return Err(ConversionError::SchemaMismatch(format!(
                     "Data has {} columns, expected {}",
@@ -110,18 +118,14 @@ impl ArrowConverter {
             }
         }
 
-        // Extract column values from row-major data
         let column_values: Vec<Vec<&Value>> = (0..num_columns)
             .map(|col_idx| {
-                result_data
-                    .data
-                    .iter()
+                rows.iter()
                     .map(|row| row.get(col_idx).unwrap_or(&Value::Null))
                     .collect()
             })
             .collect();
 
-        // Build Arrow arrays for each column - pass references directly without cloning
         let arrays: Result<Vec<_>, _> = self
             .column_types
             .iter()
@@ -133,7 +137,6 @@ impl ArrowConverter {
 
         let arrays = arrays?;
 
-        // Create RecordBatch
         RecordBatch::try_new(Arc::clone(&self.schema), arrays)
             .map_err(|e| ConversionError::ArrowError(e.to_string()))
     }
@@ -157,16 +160,24 @@ impl ArrowConverter {
     /// - UTF-8 validation fails for strings
     pub fn convert_to_record_batch_owned(
         &self,
-        mut result_data: ResultData,
+        result_data: ResultData,
     ) -> Result<RecordBatch, ConversionError> {
-        // Handle empty result set
-        if result_data.data.is_empty() {
+        // If payload is already Arrow, return it directly
+        if let ResultPayload::Arrow(batch) = result_data.data {
+            return Ok(batch);
+        }
+
+        let mut rows = match result_data.data {
+            ResultPayload::Json(rows) => rows,
+            ResultPayload::Arrow(_) => unreachable!(),
+        };
+
+        if rows.is_empty() {
             return Ok(RecordBatch::new_empty(Arc::clone(&self.schema)));
         }
 
-        // Verify column count matches schema (check first row)
         let num_columns = self.column_types.len();
-        if let Some(first_row) = result_data.data.first() {
+        if let Some(first_row) = rows.first() {
             if first_row.len() != num_columns {
                 return Err(ConversionError::SchemaMismatch(format!(
                     "Data has {} columns, expected {}",
@@ -176,13 +187,12 @@ impl ArrowConverter {
             }
         }
 
-        // Transpose row-major to column-major by draining rows
-        let num_rows = result_data.data.len();
+        let num_rows = rows.len();
         let mut columns: Vec<Vec<Value>> = (0..num_columns)
             .map(|_| Vec::with_capacity(num_rows))
             .collect();
 
-        for mut row in result_data.data.drain(..) {
+        for mut row in rows.drain(..) {
             for (col_idx, value) in row.drain(..).enumerate() {
                 if col_idx < num_columns {
                     columns[col_idx].push(value);
@@ -190,7 +200,6 @@ impl ArrowConverter {
             }
         }
 
-        // Build Arrow arrays for each column - collect references from owned values
         let arrays: Result<Vec<_>, _> = self
             .column_types
             .iter()
@@ -203,7 +212,6 @@ impl ArrowConverter {
 
         let arrays = arrays?;
 
-        // Create RecordBatch
         RecordBatch::try_new(Arc::clone(&self.schema), arrays)
             .map_err(|e| ConversionError::ArrowError(e.to_string()))
     }
@@ -318,7 +326,7 @@ fn parse_exasol_type(
 #[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
-    use crate::transport::messages::DataType;
+    use crate::transport::messages::{DataType, ResultPayload};
     use serde_json::json;
 
     fn create_test_columns() -> Vec<ColumnInfo> {
@@ -382,7 +390,7 @@ mod tests {
         // Column-major: empty data means no rows
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![],
+            data: ResultPayload::Json(vec![]),
             total_rows: 0,
         };
 
@@ -402,11 +410,11 @@ mod tests {
         // Row 2: [3, "Charlie", true]
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![json!(1), json!("Alice"), json!(true)],   // row 0
                 vec![json!(2), json!("Bob"), json!(false)],    // row 1
                 vec![json!(3), json!("Charlie"), json!(true)], // row 2
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -423,11 +431,11 @@ mod tests {
         // Row-major format
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![json!(1), json!("Alice"), json!(true)],
                 vec![json!(2), json!("Bob"), json!(false)],
                 vec![json!(3), json!("Charlie"), json!(true)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -446,11 +454,11 @@ mod tests {
         // Row-major format with nulls
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![json!(1), json!("Alice"), json!(true)], // row 0: all values present
                 vec![json!(2), json!(null), json!(false)],   // row 1: name is null
                 vec![json!(null), json!("Charlie"), json!(null)], // row 2: id and active are null
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -472,11 +480,11 @@ mod tests {
         // Row-major format with nulls
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![json!(1), json!("Alice"), json!(true)], // row 0: all values present
                 vec![json!(2), json!(null), json!(false)],   // row 1: name is null
                 vec![json!(null), json!("Charlie"), json!(null)], // row 2: id and active are null
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -501,18 +509,18 @@ mod tests {
         let chunks = vec![
             ResultData {
                 columns: columns.clone(),
-                data: vec![
+                data: ResultPayload::Json(vec![
                     vec![json!(1), json!("Alice"), json!(true)],
                     vec![json!(2), json!("Bob"), json!(false)],
-                ],
+                ]),
                 total_rows: 4,
             },
             ResultData {
                 columns: columns.clone(),
-                data: vec![
+                data: ResultPayload::Json(vec![
                     vec![json!(3), json!("Charlie"), json!(true)],
                     vec![json!(4), json!("Dave"), json!(false)],
-                ],
+                ]),
                 total_rows: 4,
             },
         ];
@@ -532,18 +540,18 @@ mod tests {
         let chunks = vec![
             ResultData {
                 columns: columns.clone(),
-                data: vec![
+                data: ResultPayload::Json(vec![
                     vec![json!(1), json!("Alice"), json!(true)],
                     vec![json!(2), json!("Bob"), json!(false)],
-                ],
+                ]),
                 total_rows: 4,
             },
             ResultData {
                 columns: columns.clone(),
-                data: vec![
+                data: ResultPayload::Json(vec![
                     vec![json!(3), json!("Charlie"), json!(true)],
                     vec![json!(4), json!("Dave"), json!(false)],
-                ],
+                ]),
                 total_rows: 4,
             },
         ];
@@ -562,9 +570,9 @@ mod tests {
         // Wrong number of columns in data (row has only 2 values instead of 3)
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![json!(1), json!("Alice")], // Missing active column
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -584,7 +592,7 @@ mod tests {
         // Wrong number of columns in data (row has only 2 values instead of 3)
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![vec![json!(1), json!("Alice")]],
+            data: ResultPayload::Json(vec![vec![json!(1), json!("Alice")]]),
             total_rows: 1,
         };
 
@@ -769,7 +777,7 @@ mod tests {
         // Row-major format
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![
                     json!(true),
                     json!("123.45"),
@@ -782,7 +790,7 @@ mod tests {
                     json!(std::f64::consts::E),
                     json!("2024-02-20"),
                 ], // row 1
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -849,7 +857,7 @@ mod tests {
         // Row-major format
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![
                     json!(true),
                     json!("123.45"),
@@ -862,7 +870,7 @@ mod tests {
                     json!(std::f64::consts::E),
                     json!("2024-02-20"),
                 ],
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -880,7 +888,7 @@ mod tests {
 
         let result_data = ResultData {
             columns: columns.clone(),
-            data: vec![],
+            data: ResultPayload::Json(vec![]),
             total_rows: 0,
         };
 

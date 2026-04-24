@@ -3,6 +3,7 @@
 //! This module defines the JSON message structures used in Exasol's WebSocket API.
 //! Messages follow the Exasol WebSocket protocol specification.
 
+use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -869,22 +870,71 @@ impl From<i32> for ResultSetHandle {
     }
 }
 
-/// Result data containing row-major data and metadata.
+/// Data payload for result sets, supporting both JSON and pre-built Arrow formats.
 ///
-/// **Note**: While Exasol WebSocket API returns data in column-major format,
-/// this struct stores data in **row-major format** after streaming deserialization.
-/// Access data as `data[row_idx][col_idx]`.
+/// The WebSocket transport produces `Json` payloads (row-major JSON values),
+/// while the native TCP transport produces `Arrow` payloads (pre-built RecordBatch
+/// directly from binary wire data, bypassing JSON entirely).
+#[derive(Debug, Clone)]
+pub enum ResultPayload {
+    /// Row-major JSON data from WebSocket transport: `data[row_idx][col_idx]`.
+    Json(Vec<Vec<serde_json::Value>>),
+    /// Pre-built Arrow RecordBatch from native transport.
+    Arrow(RecordBatch),
+}
+
+impl ResultPayload {
+    /// Returns true if the payload contains no rows.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            ResultPayload::Json(rows) => rows.is_empty(),
+            ResultPayload::Arrow(batch) => batch.num_rows() == 0,
+        }
+    }
+
+    /// Returns the number of rows in the payload.
+    pub fn num_rows(&self) -> usize {
+        match self {
+            ResultPayload::Json(rows) => rows.len(),
+            ResultPayload::Arrow(batch) => batch.num_rows(),
+        }
+    }
+
+    /// Returns a reference to the JSON data, if this is a JSON payload.
+    pub fn as_json(&self) -> Option<&Vec<Vec<serde_json::Value>>> {
+        match self {
+            ResultPayload::Json(rows) => Some(rows),
+            ResultPayload::Arrow(_) => None,
+        }
+    }
+
+    /// Returns a reference to the RecordBatch, if this is an Arrow payload.
+    pub fn as_arrow(&self) -> Option<&RecordBatch> {
+        match self {
+            ResultPayload::Json(_) => None,
+            ResultPayload::Arrow(batch) => Some(batch),
+        }
+    }
+
+    /// Consumes the payload and returns the RecordBatch, if this is an Arrow payload.
+    pub fn into_arrow(self) -> Option<RecordBatch> {
+        match self {
+            ResultPayload::Json(_) => None,
+            ResultPayload::Arrow(batch) => Some(batch),
+        }
+    }
+}
+
+/// Result data containing query results and metadata.
 ///
-/// # Example
-///
-/// For a query `SELECT id, name FROM users` returning 3 rows:
+/// Supports both JSON payloads (from WebSocket transport) and pre-built Arrow
+/// RecordBatch payloads (from native TCP transport).
 #[derive(Debug, Clone)]
 pub struct ResultData {
     /// Column metadata
     pub columns: Vec<ColumnInfo>,
-    /// Data in row-major format: data[row_idx][col_idx]
-    /// Each inner Vec contains all column values for one row.
-    pub data: Vec<Vec<serde_json::Value>>,
+    /// Data payload (JSON or Arrow)
+    pub data: ResultPayload,
     /// Total number of rows
     pub total_rows: i64,
 }
