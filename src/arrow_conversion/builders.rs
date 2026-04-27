@@ -99,13 +99,10 @@ fn estimate_string_capacity(values: &[&Value]) -> usize {
         }
     }
 
-    if count > 0 {
-        let avg_len = total_len / count;
-        // Add some buffer and multiply by total values
-        (avg_len + 8) * values.len()
-    } else {
-        DEFAULT_AVG_LEN * values.len()
-    }
+    total_len
+        .checked_div(count)
+        .map_or(DEFAULT_AVG_LEN, |avg| avg + 8)
+        * values.len()
 }
 
 fn build_string_array(values: &[&Value], column: usize) -> Result<ArrayRef, ConversionError> {
@@ -566,12 +563,10 @@ fn build_binary_array(values: &[&Value], column: usize) -> Result<ArrayRef, Conv
         .map(|s| s.len() / 2)
         .sum();
 
-    let estimated_bytes = if sample_count > 0 {
-        let avg_size = (sample_total / sample_count).max(1);
-        avg_size * values.len()
-    } else {
-        values.len() * 32 // Default estimate
-    };
+    let estimated_bytes = sample_total
+        .checked_div(sample_count)
+        .map_or(32, |avg| avg.max(1))
+        * values.len();
 
     let mut builder = BinaryBuilder::with_capacity(values.len(), estimated_bytes.max(1024));
 

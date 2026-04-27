@@ -48,8 +48,8 @@ pub struct ParquetImportOptions {
     pub column_separator: char,
     /// Column delimiter for CSV output (default: '"')
     pub column_delimiter: char,
-    /// Whether to use encryption for HTTP transport
-    pub use_encryption: bool,
+    /// Whether to use TLS for the HTTP transport tunnel
+    pub use_tls: bool,
 
     /// Exasol host for HTTP transport connection.
     /// This is typically the same host as the WebSocket connection.
@@ -87,7 +87,7 @@ impl Default for ParquetImportOptions {
             null_value: String::new(),
             column_separator: ',',
             column_delimiter: '"',
-            use_encryption: false,
+            use_tls: false,
             host: String::new(),
             port: 0,
             create_table_if_not_exists: false,
@@ -139,9 +139,10 @@ impl ParquetImportOptions {
         self
     }
 
+    /// Sets whether to use TLS for the HTTP transport tunnel.
     #[must_use]
-    pub fn with_encryption(mut self, use_encryption: bool) -> Self {
-        self.use_encryption = use_encryption;
+    pub fn use_tls(mut self, v: bool) -> Self {
+        self.use_tls = v;
         self
     }
 
@@ -263,12 +264,11 @@ where
     }
 
     // Connect to Exasol via HTTP transport client (performs handshake automatically)
-    let mut client =
-        HttpTransportClient::connect(&options.host, options.port, options.use_encryption)
-            .await
-            .map_err(|e| {
-                ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
-            })?;
+    let mut client = HttpTransportClient::connect(&options.host, options.port, options.use_tls)
+        .await
+        .map_err(|e| {
+            ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
+        })?;
 
     // Get internal address from the handshake response
     let internal_addr = client.internal_address().to_string();
@@ -426,12 +426,11 @@ where
     }
 
     // Connect to Exasol via HTTP transport client (performs handshake automatically)
-    let mut client =
-        HttpTransportClient::connect(&options.host, options.port, options.use_encryption)
-            .await
-            .map_err(|e| {
-                ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
-            })?;
+    let mut client = HttpTransportClient::connect(&options.host, options.port, options.use_tls)
+        .await
+        .map_err(|e| {
+            ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
+        })?;
 
     // Get internal address from the handshake response
     let internal_addr = client.internal_address().to_string();
@@ -615,13 +614,9 @@ where
     }
 
     // Establish parallel connections
-    let pool = ParallelTransportPool::connect(
-        &options.host,
-        options.port,
-        options.use_encryption,
-        num_files,
-    )
-    .await?;
+    let pool =
+        ParallelTransportPool::connect(&options.host, options.port, options.use_tls, num_files)
+            .await?;
 
     // Build multi-file IMPORT SQL
     let entries: Vec<ImportFileEntry> = pool
@@ -1186,7 +1181,7 @@ mod tests {
             .with_null_value("\\N")
             .with_column_separator(';')
             .with_column_delimiter('\'')
-            .with_encryption(true)
+            .use_tls(true)
             .with_exasol_host("exasol.example.com")
             .with_exasol_port(8563);
 
@@ -1199,9 +1194,15 @@ mod tests {
         assert_eq!(options.null_value, "\\N");
         assert_eq!(options.column_separator, ';');
         assert_eq!(options.column_delimiter, '\'');
-        assert!(options.use_encryption);
+        assert!(options.use_tls);
         assert_eq!(options.host, "exasol.example.com");
         assert_eq!(options.port, 8563);
+    }
+
+    #[test]
+    fn test_parquet_import_options_use_tls_builder() {
+        assert!(ParquetImportOptions::default().use_tls(true).use_tls);
+        assert!(!ParquetImportOptions::default().use_tls(false).use_tls);
     }
 
     #[test]

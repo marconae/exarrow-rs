@@ -2130,3 +2130,122 @@ async fn test_connect_with_certificate_fingerprint() {
 
     conn.close().await.expect("Failed to close connection");
 }
+
+// Auto-OPEN-SCHEMA on connect (Task 1: change-integrator-experience)
+//
+// `Database::connect()` MUST issue `OPEN SCHEMA <name>` server-side when the
+// connection URI carries a schema. Without this, unqualified queries fail
+// even though `current_schema()` reports the URI schema. These two tests
+// pin both the happy path and the cleanup-on-failure invariant.
+
+/// Connecting with a URI that names a schema activates that schema server-side
+/// without the caller having to invoke `set_schema()` explicitly.
+#[tokio::test]
+#[ignore]
+async fn test_uri_schema_is_opened_on_connect() {
+    skip_if_no_exasol!();
+
+    // Arrange: create a schema and a table inside it via an admin connection.
+    let mut admin = get_test_connection()
+        .await
+        .expect("admin connection should succeed");
+    let schema_name = generate_test_schema_name();
+    admin
+        .execute_update(&format!("CREATE SCHEMA {}", schema_name))
+        .await
+        .expect("CREATE SCHEMA should succeed");
+    admin
+        .execute_update(&format!(
+            "CREATE TABLE {}.auto_open_probe (id INTEGER, label VARCHAR(16))",
+            schema_name
+        ))
+        .await
+        .expect("CREATE TABLE should succeed");
+    admin
+        .execute_update(&format!(
+            "INSERT INTO {}.auto_open_probe VALUES (1, 'one'), (2, 'two')",
+            schema_name
+        ))
+        .await
+        .expect("INSERT should succeed");
+
+    // Act: open a fresh connection whose URI carries the schema; do NOT call
+    // `set_schema()` — the auto-OPEN-SCHEMA behavior under test must do it.
+    let driver = exarrow_rs::adbc::Driver::new();
+    let conn_str_with_schema = format!(
+        "exasol://{}:{}@{}:{}/{}?tls=true&validateservercertificate=0",
+        common::get_user(),
+        common::get_password(),
+        common::get_host(),
+        common::get_port(),
+        schema_name,
+    );
+    let database = driver
+        .open(&conn_str_with_schema)
+        .expect("URI parse with schema should succeed");
+
+    let mut conn = database
+        .connect()
+        .await
+        .expect("connect with URI schema should succeed");
+
+    let cached_schema = conn.current_schema().await;
+    let unqualified_result = conn
+        .query("SELECT id FROM auto_open_probe ORDER BY id")
+        .await;
+    let close_result = conn.close().await;
+
+    // Drop the schema before asserting so a failed assertion does not leak
+    // server-side state across test runs.
+    cleanup_schema(&mut admin, &schema_name).await;
+    admin.close().await.expect("admin close should succeed");
+
+    assert_eq!(
+        cached_schema,
+        Some(schema_name.clone()),
+        "current_schema() should reflect URI schema after auto-OPEN-SCHEMA"
+    );
+
+    let batches =
+        unqualified_result.expect("unqualified SELECT should succeed when schema is auto-opened");
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2, "should see two inserted rows");
+
+    close_result.expect("close should succeed");
+}
+
+/// Connecting with a URI that names a schema which does NOT exist must
+/// surface the failure as `Err(...)`, not return a half-open `Connection`
+/// whose session state silently disagrees with the URI.
+#[tokio::test]
+#[ignore]
+async fn test_uri_schema_activation_failure_returns_error() {
+    skip_if_no_exasol!();
+
+    let driver = exarrow_rs::adbc::Driver::new();
+    let bogus_schema = "SCHEMA_THAT_DOES_NOT_EXIST_XYZ_AUTOOPEN";
+    let conn_str = format!(
+        "exasol://{}:{}@{}:{}/{}?tls=true&validateservercertificate=0",
+        common::get_user(),
+        common::get_password(),
+        common::get_host(),
+        common::get_port(),
+        bogus_schema,
+    );
+    let database = driver
+        .open(&conn_str)
+        .expect("URI parse with schema should succeed");
+
+    let result = database.connect().await;
+
+    assert!(
+        result.is_err(),
+        "connect() with non-existent URI schema must return Err, got Ok(...)"
+    );
+    let error_msg = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        error_msg.contains("schema") || error_msg.contains(&bogus_schema.to_lowercase()),
+        "error should reference the schema activation failure, got: {}",
+        error_msg
+    );
+}

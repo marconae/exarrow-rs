@@ -177,16 +177,37 @@ impl Connection {
         // Create session
         let session = SessionInfo::new(session_id, auth_response, session_config);
 
-        // Set schema if specified
-        if let Some(schema) = &params.schema {
-            session.set_current_schema(Some(schema.clone())).await;
-        }
+        let schema = params.schema.clone();
 
-        Ok(Self {
+        let mut connection = Self {
             transport: Arc::new(Mutex::new(transport)),
             session,
             params,
-        })
+        };
+
+        // If the URI carried a schema, activate it server-side so unqualified
+        // queries work without a follow-up `set_schema()` call. On failure we
+        // must close the transport (we are already authenticated server-side)
+        // before propagating the error — returning a half-open `Connection`
+        // whose session state silently disagrees with the URI is worse than a
+        // clear error.
+        if let Some(schema_name) = schema {
+            if let Err(query_err) = connection.set_schema(schema_name.clone()).await {
+                let host = connection.params.host.clone();
+                let port = connection.params.port;
+                let _ = connection.shutdown().await;
+                return Err(ConnectionError::ConnectionFailed {
+                    host,
+                    port,
+                    message: format!(
+                        "failed to activate schema '{}' from connection URI: {}",
+                        schema_name, query_err
+                    ),
+                });
+            }
+        }
+
+        Ok(connection)
     }
 
     /// Create a builder for constructing a connection.

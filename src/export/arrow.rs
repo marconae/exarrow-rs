@@ -108,10 +108,10 @@ pub struct ArrowExportOptions {
     /// Exasol port for HTTP transport connection.
     /// This is typically the same port as the WebSocket connection.
     pub port: u16,
-    /// Whether to use TLS for the HTTP transport connection.
+    /// Whether to use TLS for the HTTP transport tunnel.
     /// Default is `false` because the main WebSocket connection typically
     /// already handles TLS encryption.
-    pub use_encryption: bool,
+    pub use_tls: bool,
 }
 
 impl Default for ArrowExportOptions {
@@ -124,7 +124,7 @@ impl Default for ArrowExportOptions {
             column_delimiter: '"',
             host: String::new(),
             port: 0,
-            use_encryption: false,
+            use_tls: false,
         }
     }
 }
@@ -184,13 +184,10 @@ impl ArrowExportOptions {
         self
     }
 
-    /// Sets whether to use TLS for the HTTP transport connection.
-    ///
-    /// Default is `false` because the main WebSocket connection typically
-    /// already handles TLS encryption for the control channel.
+    /// Sets whether to use TLS for the HTTP transport tunnel.
     #[must_use]
-    pub fn use_encryption(mut self, use_encryption: bool) -> Self {
-        self.use_encryption = use_encryption;
+    pub fn use_tls(mut self, v: bool) -> Self {
+        self.use_tls = v;
         self
     }
 }
@@ -864,7 +861,7 @@ pub async fn export_to_record_batches<T: TransportProtocol + ?Sized>(
         .with_column_names(false)
         .exasol_host(&options.host)
         .exasol_port(options.port)
-        .use_tls(options.use_encryption);
+        .use_tls(options.use_tls);
 
     // Get the CSV data as a list of rows
     let rows = export_to_list(transport, source, csv_options).await?;
@@ -993,7 +990,7 @@ mod tests {
         assert_eq!(options.column_delimiter, '"');
         assert_eq!(options.host, "");
         assert_eq!(options.port, 0);
-        assert!(!options.use_encryption);
+        assert!(!options.use_tls);
     }
 
     #[test]
@@ -1008,7 +1005,7 @@ mod tests {
             .with_column_delimiter('\'')
             .exasol_host("exasol.example.com")
             .exasol_port(8563)
-            .use_encryption(true);
+            .use_tls(true);
 
         assert_eq!(options.batch_size, 2048);
         assert_eq!(options.null_value, Some("NULL".to_string()));
@@ -1017,7 +1014,13 @@ mod tests {
         assert_eq!(options.column_delimiter, '\'');
         assert_eq!(options.host, "exasol.example.com");
         assert_eq!(options.port, 8563);
-        assert!(options.use_encryption);
+        assert!(options.use_tls);
+    }
+
+    #[test]
+    fn test_arrow_export_options_use_tls_builder() {
+        assert!(ArrowExportOptions::default().use_tls(true).use_tls);
+        assert!(!ArrowExportOptions::default().use_tls(false).use_tls);
     }
 
     // ==========================================================================

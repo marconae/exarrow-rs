@@ -22,6 +22,19 @@
 //! cargo run --example import_export
 //! ```
 
+// Canonical patterns for working with query results:
+//
+// Pattern: extract scalar from SELECT COUNT(*)
+// Exasol COUNT(*) returns DECIMAL(18,0), which Arrow maps to Decimal128(18,0).
+// let count = results.first()
+//     .and_then(|b| b.column(0).as_any().downcast_ref::<Decimal128Array>())
+//     .map(|arr| arr.value(0))  // raw i128; scale=0 so value equals the count
+//     .unwrap_or(0);
+//
+// Pattern: sum rows across multiple batches
+// let total: usize = results.iter().map(|b| b.num_rows()).sum();
+
+use arrow::array::Decimal128Array;
 use exarrow_rs::adbc::{Connection, Driver};
 use exarrow_rs::export::{CsvExportOptions, ParquetExportOptions};
 use exarrow_rs::import::{CsvImportOptions, ParquetImportOptions};
@@ -227,7 +240,12 @@ async fn example_import_parquet(
             SCHEMA
         ))
         .await?;
-    println!("Verification: Found {} rows with id >= 10", results.len());
+    let count = results
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Decimal128Array>())
+        .map(|arr| arr.value(0))
+        .unwrap_or(0);
+    println!("Verification: Found {} rows with id >= 10", count);
 
     Ok(())
 }
@@ -253,7 +271,12 @@ async fn example_import_csv(conn: &mut Connection, _config: &Config) -> Result<(
             SCHEMA
         ))
         .await?;
-    println!("Verification: Found {} rows with id < 10", results.len());
+    let count = results
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Decimal128Array>())
+        .map(|arr| arr.value(0))
+        .unwrap_or(0);
+    println!("Verification: Found {} rows with id < 10", count);
 
     Ok(())
 }
@@ -386,10 +409,12 @@ async fn example_parallel_csv_import(
     let results = conn
         .query(&format!("SELECT COUNT(*) FROM {}.parallel_users", SCHEMA))
         .await?;
-    println!(
-        "Verification: Table contains {} batches of results",
-        results.len()
-    );
+    let count = results
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Decimal128Array>())
+        .map(|arr| arr.value(0))
+        .unwrap_or(0);
+    println!("Verification: Table contains {} rows", count);
 
     Ok(())
 }
@@ -503,10 +528,12 @@ async fn example_parallel_parquet_import(
             SCHEMA
         ))
         .await?;
-    println!(
-        "Verification: Table contains {} batches of results",
-        results.len()
-    );
+    let count = results
+        .first()
+        .and_then(|b| b.column(0).as_any().downcast_ref::<Decimal128Array>())
+        .map(|arr| arr.value(0))
+        .unwrap_or(0);
+    println!("Verification: Table contains {} rows", count);
 
     Ok(())
 }

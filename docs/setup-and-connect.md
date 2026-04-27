@@ -47,6 +47,8 @@ use exarrow_rs::adbc::Driver;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let driver = Driver::new();
     let database = driver.open("exasol://user:password@localhost:8563/my_schema")?;
+    // The schema in the URI (/my_schema) is opened server-side automatically during connect().
+    // Unqualified queries can reference tables in my_schema without any additional setup.
     let mut connection = database.connect().await?;
 
     // Use the connection...
@@ -55,6 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+If you need to switch schemas after connecting, call `connection.set_schema("other_schema").await?`. The `set_schema()` method is also available for connections opened without a URI schema.
 
 ## Parameters
 
@@ -98,6 +102,14 @@ exasol://user@[::1]:8563
 exasol://user@[2001:db8::1]:9000/schema
 ```
 
+## Schema and Session Behavior
+
+When the connection URI includes a schema path (e.g., `/my_schema`), `connect()` automatically issues `OPEN SCHEMA my_schema` server-side before returning the connection. Unqualified queries — `SELECT * FROM my_table` rather than `SELECT * FROM my_schema.my_table` — will resolve against that schema immediately, without any manual setup step.
+
+- **Auto-apply on connect**: `database.connect().await?` opens the schema stated in the URI. If the schema does not exist, `connect()` returns a `ConnectionError` rather than returning a connection whose schema state silently differs from the URI.
+- **Switch schemas at runtime**: Call `connection.set_schema("other_schema").await?` at any point after connecting to change the active schema. This is useful when you need to access multiple schemas within the same session.
+- **Session state accessors**: Use `connection.current_schema()` to read the currently open schema name, and `connection.session_id()` to retrieve the numeric session identifier assigned by the server.
+
 ## Session Attributes
 
 Any unrecognized query parameter is forwarded as a session attribute to the Exasol server. Common attributes from the [Exasol WebSocket API](https://github.com/exasol/websocket-api):
@@ -130,6 +142,9 @@ exasol://user:password@host:8563?validateservercertificate=0
 ```
 exasol://user:password@host:8563?tls=false
 ```
+
+> [!NOTE]
+> The control connection and the HTTP transport tunnel for bulk import/export are configured independently. See [WebSocket TLS vs HTTP transport TLS](import-export.md#websocket-tls-vs-http-transport-tls) in the Import/Export docs for details and environment-specific examples.
 
 ## Timeouts
 
@@ -168,7 +183,7 @@ Enable the `websocket` feature in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-exarrow-rs = { version = "0.10", features = ["websocket"] }
+exarrow-rs = { version = "0.11", features = ["websocket"] }
 ```
 
 Select WebSocket for a specific connection via the `transport` parameter:

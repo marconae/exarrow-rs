@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_import_with_encryption() {
+    fn test_import_with_use_tls() {
         let fingerprint = "SHA256:abc123def456";
         let sql = ImportQuery::new("secure_data")
             .at_address("192.168.1.1:8443")

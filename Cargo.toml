@@ -1,6 +1,6 @@
 [package]
 name = "exarrow-rs"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 authors = ["Exasol Labs <labs@exasol.com>"]
@@ -11,6 +11,10 @@ documentation = "https://docs.rs/exarrow-rs"
 readme = "README.md"
 keywords = ["exasol", "adbc", "arrow", "database", "driver"]
 categories = ["database"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 crate-type = ["lib", "cdylib"]

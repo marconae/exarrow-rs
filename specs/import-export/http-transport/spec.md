@@ -65,7 +65,7 @@ TCP connection that is "hijacked" into a bidirectional HTTP tunnel.
 
 ## Background
 
-The client establishes an outbound TCP connection to Exasol and performs a magic packet handshake to create a bidirectional HTTP tunnel. All data transfer occurs through this single established connection, enabling firewall-friendly operation requiring only outbound connections. TLS encryption uses ad-hoc RSA certificates with SHA-256 fingerprints passed in SQL PUBLIC KEY clauses.
+The client establishes an outbound TCP connection to Exasol and performs a magic packet handshake to create a bidirectional HTTP tunnel. All data transfer occurs through this single established connection, enabling firewall-friendly operation requiring only outbound connections. TLS encryption uses ad-hoc RSA certificates with SHA-256 fingerprints passed in SQL PUBLIC KEY clauses. The HTTP-transport TLS layer is independent of the main control-channel TLS layer (WebSocket or native TCP); applications configure HTTP-transport TLS per import/export operation via `use_tls(bool)` on the corresponding option builder.
 
 ## Scenarios
 
@@ -122,3 +122,25 @@ The client establishes an outbound TCP connection to Exasol and performs a magic
 * *THEN* Exasol SHALL send HTTP PUT request through tunnel with data
 * *AND* client SHALL receive PUT request with chunked transfer encoding
 * *AND* client SHALL read data chunks until zero-length terminator
+
+### Scenario: WebSocket TLS and HTTP transport TLS are independent
+
+* *GIVEN* a connection has been established to Exasol with the main control channel (WebSocket or native TCP) using its own TLS configuration
+* *WHEN* the application initiates an import or export operation that uses the HTTP transport tunnel
+* *THEN* the HTTP-transport TLS setting (`use_tls(bool)` on the import/export options) SHALL be evaluated independently of the main control channel's TLS state
+* *AND* the driver MUST NOT infer the HTTP-transport TLS setting from the control channel's TLS configuration
+* *AND* the documented default for the HTTP-transport `use_tls` SHALL remain `false` because Exasol generates ad-hoc certificates for the tunnel that fail standard certificate validation in many client environments
+
+### Scenario: HTTP transport TLS against Exasol Docker (self-signed certificate)
+
+* *GIVEN* the application connects to a local `exasol/docker-db` instance with a control-channel connection string of the form `exasol://sys:exasol@localhost:8563/?validateservercertificate=0`
+* *WHEN* the application performs an import or export through the HTTP transport tunnel
+* *THEN* the application SHOULD set `use_tls(false)` on the import/export options
+* *AND* the driver SHALL use a plain HTTP tunnel (no rustls wrap) so that the Exasol-side SQLProcess can connect back without certificate-validation failures from the ad-hoc cert
+
+### Scenario: HTTP transport TLS against Exasol SaaS / production
+
+* *GIVEN* the application connects to a managed or production Exasol cluster with TLS termination on the control channel and a trusted certificate chain
+* *WHEN* the application performs an import or export through the HTTP transport tunnel
+* *THEN* the application SHOULD set `use_tls(true)` on the import/export options
+* *AND* the driver SHALL generate an ad-hoc RSA certificate, wrap the tunnel with rustls, and pass the SHA-256 fingerprint as `PUBLIC KEY 'sha256//<base64>'` in the IMPORT/EXPORT SQL `AT` clause

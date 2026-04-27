@@ -4,7 +4,7 @@ Specifies Parquet file import and export capabilities, converting between Parque
 
 ## Background
 
-Parquet import and export operates by converting between Parquet and CSV formats. Import reads Parquet files, converts typed columns to CSV representation (preserving NULLs), and streams through the HTTP tunnel. Export receives CSV from Exasol, converts to Parquet format with schema derived from Exasol metadata, and writes to files or streams.
+Parquet import and export operates by converting between Parquet and CSV formats. Import reads Parquet files, converts typed columns to CSV representation (preserving NULLs), and streams through the HTTP tunnel. Export receives CSV from Exasol, converts to Parquet format with schema derived from Exasol metadata, and writes to files or streams. The HTTP-transport TLS knob is exposed as a single fluent method `use_tls(bool)` on both option builders, replacing the earlier `with_encryption(bool)` (import) and `use_encryption(bool)` (export) names.
 
 ## Scenarios
 
@@ -46,3 +46,12 @@ Parquet import and export operates by converting between Parquet and CSV formats
 * *GIVEN* an AsyncWrite implementation is available for Parquet output
 * *WHEN* user provides AsyncWrite for Parquet output
 * *THEN* system SHALL stream Parquet data to writer
+
+### Scenario: TLS for HTTP transport is configured uniformly via use_tls
+
+* *GIVEN* an application configures Parquet import or export options
+* *WHEN* the application enables or disables TLS on the HTTP transport tunnel
+* *THEN* the option builders `ParquetImportOptions` and `ParquetExportOptions` SHALL expose a single fluent method `use_tls(bool)` to control HTTP-transport TLS
+* *AND* the option builders MUST NOT expose `with_encryption(bool)` or `use_encryption(bool)` aliases
+* *AND* the underlying option struct field SHALL be named `use_tls` (renamed from `use_encryption`) so that public field access uses the same vocabulary as the builder
+* *AND* the default value of `use_tls` SHALL remain `false` to preserve current Docker/self-signed-cert behavior
