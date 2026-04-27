@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- **Breaking:** Renamed HTTP transport TLS option to `use_tls(bool)` uniformly across all import/export option builders. The old names `with_encryption` (Parquet import, Arrow import) and `use_encryption` (Parquet export, Arrow export) are removed. CSV builders were already using `use_tls` and are unchanged.
+- **Feat:** `Database::connect()` now automatically issues `OPEN SCHEMA` when the connection URI or builder includes a schema. Callers no longer need to call `set_schema()` manually after connecting. If schema activation fails, `connect()` returns an error (no half-open connection).
+- **Docs:** Added "WebSocket TLS vs HTTP Transport TLS" section to `docs/import-export.md` with Docker and production examples.
+- **Docs:** Added "Which import path should I use?" decision guide to `docs/import-export.md`.
+- **Docs:** Added real rustdoc examples to crate root (`src/lib.rs`); added `[package.metadata.docs.rs]` for stable docs.rs builds.
+- **Docs:** Fixed example verification patterns in `examples/import_export.rs` to use actual row counts instead of batch counts.
+- **Contributor:** Split `CLAUDE.md` into `AGENTS.md` (agent-facing) and `CONTRIBUTING.md` (human-facing). `CLAUDE.md` now imports `AGENTS.md` via `@AGENTS.md`.
+
 ## 0.10.0
 
 - Native TCP protocol transport as the default, replacing WebSocket for query execution (16x throughput improvement). The native protocol uses Exasol's little-endian binary framing with ChaCha20 stream encryption and direct binary result set parsing.

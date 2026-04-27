@@ -2739,3 +2739,135 @@ fn test_autocommit_toggle_with_dml() {
         let _ = stmt.execute_update();
     }
 }
+
+/// Auto-OPEN-SCHEMA on connect via the FFI / driver-manager path
+/// (Task 1.2: change-integrator-experience).
+///
+/// FFI Audit: `FfiConnection::ensure_connected` (`src/adbc_ffi.rs`) parses the
+/// URI into `ConnectionParams` and calls `ExaConnection::from_params(params).await`.
+/// That is exactly the same code path the direct API uses, so the auto-OPEN
+/// behavior implemented in `Connection::connect_with_transport` applies here
+/// without any FFI-specific change.
+///
+/// This test confirms the behavior across the dynamic-library boundary. The
+/// FFI runtime is `multi_thread(2)` (see `src/adbc_ffi.rs`), so the inner
+/// `OPEN SCHEMA` await runs on a multi-threaded scheduler — we only need to
+/// observe the user-facing outcome.
+///
+/// Per CLAUDE.md: this test loads `target/release/libexarrow_rs.so` (or
+/// `.dylib`); run `cargo build --release --features ffi` before
+/// `cargo test --test driver_manager_tests -- --ignored`.
+#[test]
+#[ignore]
+fn test_ffi_uri_schema_is_opened_on_connect() {
+    skip_if_no_library!();
+    skip_if_no_exasol!();
+
+    let lib_path = get_library_path();
+    let mut driver = ManagedDriver::load_dynamic_from_filename(
+        lib_path,
+        Some(b"ExarrowDriverInit"),
+        AdbcVersion::V110,
+    )
+    .expect("Failed to load driver");
+
+    let schema_name = generate_unique_test_name("TEST_FFI_AUTOOPEN");
+
+    // Step 1: admin connection (no schema in URI) creates the test schema/table.
+    {
+        let admin_uri = get_test_uri();
+        let admin_db = driver
+            .new_database_with_opts(vec![(OptionDatabase::Uri, OptionValue::String(admin_uri))])
+            .expect("Failed to create admin database");
+        let mut admin_conn = admin_db
+            .new_connection()
+            .expect("Failed to create admin connection");
+
+        let mut stmt = admin_conn
+            .new_statement()
+            .expect("Failed to create statement");
+        stmt.set_sql_query(format!("CREATE SCHEMA {}", schema_name))
+            .unwrap();
+        stmt.execute_update().expect("CREATE SCHEMA should succeed");
+
+        let mut stmt = admin_conn
+            .new_statement()
+            .expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "CREATE TABLE {}.FFI_AUTO_OPEN_PROBE (id INTEGER)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().expect("CREATE TABLE should succeed");
+
+        let mut stmt = admin_conn
+            .new_statement()
+            .expect("Failed to create statement");
+        stmt.set_sql_query(format!(
+            "INSERT INTO {}.FFI_AUTO_OPEN_PROBE VALUES (7)",
+            schema_name
+        ))
+        .unwrap();
+        stmt.execute_update().expect("INSERT should succeed");
+    }
+
+    // Step 2: open a fresh FFI database whose URI carries the schema.
+    let scoped_uri = format!(
+        "exasol://{}:{}@{}:{}/{}?tls=true&validateservercertificate=0",
+        get_user(),
+        get_password(),
+        get_host(),
+        get_port(),
+        schema_name,
+    );
+    let scoped_db = driver
+        .new_database_with_opts(vec![(OptionDatabase::Uri, OptionValue::String(scoped_uri))])
+        .expect("Failed to create scoped database");
+    let mut scoped_conn = scoped_db
+        .new_connection()
+        .expect("Failed to create scoped connection");
+
+    // Step 3: assert an unqualified SELECT against the table works WITHOUT any
+    // explicit `set_schema`-equivalent option. This is the FFI-layer evidence
+    // that auto-OPEN-SCHEMA fires on connect.
+    let mut stmt = scoped_conn
+        .new_statement()
+        .expect("Failed to create statement");
+    stmt.set_sql_query("SELECT id FROM FFI_AUTO_OPEN_PROBE")
+        .unwrap();
+    let mut reader = stmt
+        .execute()
+        .expect("unqualified SELECT must succeed when URI schema is auto-opened");
+
+    let mut total_rows = 0usize;
+    for batch in reader.by_ref() {
+        let batch = batch.expect("batch read should succeed");
+        total_rows += batch.num_rows();
+    }
+    assert_eq!(
+        total_rows, 1,
+        "should observe the row inserted by the admin connection"
+    );
+
+    // Drop scoped resources before cleanup so the FFI library tears down its
+    // statement/connection state cleanly.
+    drop(reader);
+    drop(stmt);
+    drop(scoped_conn);
+    drop(scoped_db);
+
+    // Cleanup via a fresh admin connection.
+    let admin_uri = get_test_uri();
+    let cleanup_db = driver
+        .new_database_with_opts(vec![(OptionDatabase::Uri, OptionValue::String(admin_uri))])
+        .expect("Failed to create cleanup database");
+    let mut cleanup_conn = cleanup_db
+        .new_connection()
+        .expect("Failed to create cleanup connection");
+    let mut stmt = cleanup_conn
+        .new_statement()
+        .expect("Failed to create statement");
+    stmt.set_sql_query(format!("DROP SCHEMA {} CASCADE", schema_name))
+        .unwrap();
+    let _ = stmt.execute_update();
+}

@@ -71,8 +71,8 @@ pub struct ArrowImportOptions {
     pub batch_size: usize,
     /// CSV writer options
     pub csv_options: CsvWriterOptions,
-    /// Whether to use TLS encryption for transport
-    pub use_encryption: bool,
+    /// Whether to use TLS for the HTTP transport tunnel
+    pub use_tls: bool,
     /// Exasol host for HTTP transport connection.
     /// This is typically the same host as the WebSocket connection.
     pub host: String,
@@ -88,7 +88,7 @@ impl Default for ArrowImportOptions {
             columns: None,
             batch_size: 10000,
             csv_options: CsvWriterOptions::default(),
-            use_encryption: false,
+            use_tls: false,
             host: String::new(),
             port: 0,
         }
@@ -138,9 +138,10 @@ impl ArrowImportOptions {
         self
     }
 
+    /// Sets whether to use TLS for the HTTP transport tunnel.
     #[must_use]
-    pub fn with_encryption(mut self) -> Self {
-        self.use_encryption = true;
+    pub fn use_tls(mut self, v: bool) -> Self {
+        self.use_tls = v;
         self
     }
 
@@ -801,7 +802,7 @@ where
         trim_mode: crate::query::import::TrimMode::None,
         compression: crate::query::import::Compression::None,
         reject_limit: None,
-        use_tls: options.use_encryption,
+        use_tls: options.use_tls,
         schema: options.schema.clone(),
         columns: options.columns.clone(),
         host: options.host.clone(),
@@ -872,7 +873,7 @@ where
         trim_mode: crate::query::import::TrimMode::None,
         compression: crate::query::import::Compression::None,
         reject_limit: None,
-        use_tls: options.use_encryption,
+        use_tls: options.use_tls,
         schema: options.schema.clone(),
         columns: options.columns.clone(),
         host: options.host.clone(),
@@ -957,7 +958,7 @@ where
         trim_mode: crate::query::import::TrimMode::None,
         compression: crate::query::import::Compression::None,
         reject_limit: None,
-        use_tls: options.use_encryption,
+        use_tls: options.use_tls,
         schema: options.schema.clone(),
         columns: options.columns.clone(),
         host: options.host.clone(),
@@ -1022,7 +1023,7 @@ mod tests {
         assert!(options.schema.is_none());
         assert!(options.columns.is_none());
         assert_eq!(options.batch_size, 10000);
-        assert!(!options.use_encryption);
+        assert!(!options.use_tls);
         assert_eq!(options.host, "");
         assert_eq!(options.port, 0);
     }
@@ -1035,7 +1036,7 @@ mod tests {
             .batch_size(5000)
             .null_value("NULL")
             .column_separator(';')
-            .with_encryption()
+            .use_tls(true)
             .exasol_host("exasol.example.com")
             .exasol_port(8563);
 
@@ -1047,9 +1048,15 @@ mod tests {
         assert_eq!(options.batch_size, 5000);
         assert_eq!(options.csv_options.null_value, "NULL");
         assert_eq!(options.csv_options.column_separator, ';');
-        assert!(options.use_encryption);
+        assert!(options.use_tls);
         assert_eq!(options.host, "exasol.example.com");
         assert_eq!(options.port, 8563);
+    }
+
+    #[test]
+    fn test_arrow_import_options_use_tls_builder() {
+        assert!(ArrowImportOptions::default().use_tls(true).use_tls);
+        assert!(!ArrowImportOptions::default().use_tls(false).use_tls);
     }
 
     #[test]

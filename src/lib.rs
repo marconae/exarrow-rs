@@ -16,20 +16,80 @@
 //! - **Streaming**: Memory-efficient streaming for large datasets
 //! - **Compression**: Support for gzip, bzip2, snappy, lz4, and zstd compression
 //!
-//! ## Query Example
+//! ## Connect
 //!
+//! ```no_run
+//! use exarrow_rs::adbc::{Driver, Database, Connection};
 //!
-//! ## CSV Import Example
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let driver = Driver::new();
+//!     // Schema in the URI is automatically opened with OPEN SCHEMA after login.
+//!     let database = driver.open(
+//!         "exasol://sys:exasol@localhost:8563/my_schema?validateservercertificate=0"
+//!     )?;
+//!     let mut connection = database.connect().await?;
+//!     println!("Connected: session {}", connection.session_id());
+//!     connection.close().await?;
+//!     Ok(())
+//! }
+//! ```
 //!
+//! ## Execute a query
 //!
-//! ## CSV Export Example
+//! ```no_run
+//! use exarrow_rs::adbc::{Driver, Connection};
 //!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let driver = Driver::new();
+//!     let database = driver.open(
+//!         "exasol://sys:exasol@localhost:8563/my_schema?validateservercertificate=0"
+//!     )?;
+//!     let mut connection = database.connect().await?;
 //!
-//! ## Parquet Import/Export Example
+//!     let batches = connection.query("SELECT id, name FROM users ORDER BY id").await?;
+//!     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+//!     println!("Fetched {} rows across {} batch(es)", total_rows, batches.len());
 //!
+//!     connection.close().await?;
+//!     Ok(())
+//! }
+//! ```
 //!
-//! ## Arrow RecordBatch Import/Export Example
+//! ## Import data
 //!
+//! ```no_run
+//! use exarrow_rs::adbc::{Driver, Connection};
+//! use exarrow_rs::import::{CsvImportOptions, ParquetImportOptions};
+//! use std::path::PathBuf;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let driver = Driver::new();
+//!     let database = driver.open(
+//!         "exasol://sys:exasol@localhost:8563/my_schema?validateservercertificate=0"
+//!     )?;
+//!     let mut connection = database.connect().await?;
+//!
+//!     // Import CSV files
+//!     let csv_files = vec![PathBuf::from("/data/part1.csv"), PathBuf::from("/data/part2.csv")];
+//!     let rows = connection
+//!         .import_csv_from_files("users", csv_files, CsvImportOptions::default())
+//!         .await?;
+//!     println!("Imported {} rows from CSV", rows);
+//!
+//!     // Import Parquet files
+//!     let parquet_files = vec![PathBuf::from("/data/snapshot.parquet")];
+//!     let rows = connection
+//!         .import_parquet_from_files("users", parquet_files, ParquetImportOptions::default())
+//!         .await?;
+//!     println!("Imported {} rows from Parquet", rows);
+//!
+//!     connection.close().await?;
+//!     Ok(())
+//! }
+//! ```
 
 // Module declarations
 pub mod adbc;

@@ -30,6 +30,8 @@ use exarrow_rs::adbc::Driver;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let driver = Driver::new();
     let database = driver.open("exasol://user:pwd@localhost:8563/my_schema")?;
+    // The URI schema (/my_schema) is applied server-side automatically during connect().
+    // No manual set_schema() call is needed.
     let mut connection = database.connect().await?;
 
     let results = connection.query("SELECT * FROM customers").await?;
@@ -52,7 +54,7 @@ The WebSocket transport is available as an opt-in alternative for compatibility 
 
 ```toml
 [dependencies]
-exarrow-rs = { version = "0.10", features = ["websocket"] }
+exarrow-rs = { version = "0.11", features = ["websocket"] }
 ```
 
 ```rust

@@ -4,7 +4,7 @@ Specifies session management, connection pooling foundation, and timeout configu
 
 ## Background
 
-The system SHALL manage database session lifecycle from establishment through termination. Connections SHALL support clean state reset to enable future pooling implementations. Configurable timeouts SHALL govern connection, query, and idle operations with sensible defaults.
+The system SHALL manage database session lifecycle from establishment through termination. Connections SHALL support clean state reset to enable future pooling implementations. Configurable timeouts SHALL govern connection, query, and idle operations with sensible defaults. When the connection URI or `ConnectionParams` carries a schema, the driver SHALL eagerly activate that schema server-side during `connect()` so unqualified statements resolve immediately, matching the behavior of pyexasol and other ADBC drivers.
 
 ## Scenarios
 
@@ -21,6 +21,8 @@ The system SHALL manage database session lifecycle from establishment through te
 * *WHEN* session attributes are requested
 * *THEN* it SHALL provide current schema, session ID, and other metadata
 * *AND* it SHALL allow setting session attributes (e.g., current schema)
+* *AND* when a schema is supplied via the connection URI or `ConnectionParams.schema`, it SHALL apply that schema server-side during `connect()` so that subsequent statements resolve unqualified identifiers against it without an additional client call
+* *AND* if the server-side schema activation fails, `connect()` MUST return a `ConnectionError` and MUST NOT leave a half-open connection visible to the caller
 
 ### Scenario: Session termination
 
@@ -63,3 +65,18 @@ The system SHALL manage database session lifecycle from establishment through te
 * *WHEN* a connection is idle
 * *THEN* it SHALL support optional idle timeout configuration
 * *AND* it SHALL close connections that exceed idle timeout
+
+### Scenario: Schema in connection params is opened on connect
+
+* *GIVEN* a `Database` configured with a connection string of the form `exasol://user:pass@host/SCHEMA_NAME`
+* *WHEN* the application calls `Database::connect()` (or the equivalent ADBC FFI path)
+* *THEN* the driver SHALL execute `OPEN SCHEMA SCHEMA_NAME` against the established session before returning the `Connection`
+* *AND* the returned `Connection` MUST report `SCHEMA_NAME` from `current_schema()`
+* *AND* a subsequent unqualified `SELECT * FROM TABLE_X` MUST resolve against `SCHEMA_NAME` without the caller invoking `set_schema()`
+
+### Scenario: Schema activation failure surfaces during connect
+
+* *GIVEN* a `Database` configured with a non-existent schema in the connection params
+* *WHEN* the application calls `Database::connect()`
+* *THEN* `connect()` MUST return a `ConnectionError` whose source identifies the schema activation failure
+* *AND* the underlying transport session MUST be closed before the error is returned so that no leaked session remains on the server

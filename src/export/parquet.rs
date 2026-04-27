@@ -138,10 +138,10 @@ pub struct ParquetExportOptions {
     /// Exasol port for HTTP transport connection.
     /// This is typically the same port as the WebSocket connection.
     pub port: u16,
-    /// Whether to use TLS for the HTTP transport connection.
+    /// Whether to use TLS for the HTTP transport tunnel.
     /// Default is `false` because the main WebSocket connection typically
     /// already handles TLS encryption.
-    pub use_encryption: bool,
+    pub use_tls: bool,
 }
 
 impl Default for ParquetExportOptions {
@@ -155,7 +155,7 @@ impl Default for ParquetExportOptions {
             null_value: None,
             host: String::new(),
             port: 0,
-            use_encryption: false,
+            use_tls: false,
         }
     }
 }
@@ -221,13 +221,10 @@ impl ParquetExportOptions {
         self
     }
 
-    /// Set whether to use TLS for the HTTP transport connection.
-    ///
-    /// Default is `false` because the main WebSocket connection typically
-    /// already handles TLS encryption for the control channel.
+    /// Sets whether to use TLS for the HTTP transport tunnel.
     #[must_use]
-    pub fn use_encryption(mut self, use_encryption: bool) -> Self {
-        self.use_encryption = use_encryption;
+    pub fn use_tls(mut self, v: bool) -> Self {
+        self.use_tls = v;
         self
     }
 }
@@ -855,7 +852,7 @@ pub async fn export_to_parquet_via_transport<T: TransportProtocol + ?Sized>(
         .with_column_names(false)
         .exasol_host(&options.host)
         .exasol_port(options.port)
-        .use_tls(options.use_encryption);
+        .use_tls(options.use_tls);
 
     // Get the CSV data as a list of rows
     let rows = export_to_list(transport, source, csv_options).await?;
@@ -946,7 +943,7 @@ mod tests {
         assert!(options.null_value.is_none());
         assert_eq!(options.host, "");
         assert_eq!(options.port, 0);
-        assert!(!options.use_encryption);
+        assert!(!options.use_tls);
     }
 
     #[test]
@@ -960,7 +957,7 @@ mod tests {
             .with_null_value("\\N")
             .exasol_host("exasol.example.com")
             .exasol_port(8563)
-            .use_encryption(true);
+            .use_tls(true);
 
         assert_eq!(options.batch_size, 2048);
         assert_eq!(options.compression, ParquetCompression::Gzip);
@@ -970,7 +967,13 @@ mod tests {
         assert_eq!(options.null_value, Some("\\N".to_string()));
         assert_eq!(options.host, "exasol.example.com");
         assert_eq!(options.port, 8563);
-        assert!(options.use_encryption);
+        assert!(options.use_tls);
+    }
+
+    #[test]
+    fn test_parquet_export_options_use_tls_builder() {
+        assert!(ParquetExportOptions::default().use_tls(true).use_tls);
+        assert!(!ParquetExportOptions::default().use_tls(false).use_tls);
     }
 
     // ==========================================================================
