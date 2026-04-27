@@ -1,6 +1,6 @@
 [package]
 name = "exarrow-rs"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 authors = ["Exasol Labs <labs@exasol.com>"]
@@ -23,8 +23,8 @@ arrow = "57.1.0"
 # Async runtime
 tokio = { version = "1.42", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs"] }
 
-# WebSocket client
-tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+# WebSocket client (optional, only needed with websocket feature)
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"], optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -36,8 +36,8 @@ thiserror = "2.0"
 # Native root certificates for rustls
 rustls-native-certs = "0.8"
 
-# Async utilities
-futures-util = "0.3"
+# Async utilities (optional, only needed with websocket feature)
+futures-util = { version = "0.3", optional = true }
 async-trait = "0.1"
 
 # URL encoding/decoding
@@ -80,6 +80,10 @@ chrono = "0.4"
 # Byte buffer utilities
 bytes = "1.10"
 
+# ChaCha20 stream cipher for native protocol encryption
+chacha20 = "0.9"
+cipher = "0.4"
+
 # Benchmark dependencies (optional)
 fake = { version = "3.1", features = ["derive", "chrono"], optional = true }
 rand = { version = "0.8", optional = true }
@@ -111,6 +115,8 @@ path = "benches/rust/benchmark.rs"
 required-features = ["benchmark"]
 
 [features]
-default = []
-ffi = ["dep:adbc_core", "dep:adbc_ffi"]
+default = ["native"]
+native = []
+websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+ffi = ["dep:adbc_core", "dep:adbc_ffi", "native"]
 benchmark = ["dep:fake", "dep:rand", "dep:indicatif", "dep:clap", "dep:dotenvy", "dep:polars"]

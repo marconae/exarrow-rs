@@ -26,8 +26,8 @@ use super::messages::{
     CloseResultSetRequest, CloseResultSetResponse, CreatePreparedStatementRequest,
     CreatePreparedStatementResponse, DisconnectRequest, DisconnectResponse,
     ExecutePreparedStatementRequest, ExecuteRequest, ExecuteResponse, FetchRequest, FetchResponse,
-    LoginInitRequest, LoginResponse, PublicKeyResponse, ResultData, ResultSetHandle, SessionInfo,
-    SetAttributesRequest, SetAttributesResponse,
+    LoginInitRequest, LoginResponse, PublicKeyResponse, ResultData, ResultPayload, ResultSetHandle,
+    SessionInfo, SetAttributesRequest, SetAttributesResponse,
 };
 use super::protocol::{
     ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
@@ -505,7 +505,7 @@ impl TransportProtocol for WebSocketTransport {
 
                 let data = ResultData {
                     columns,
-                    data: data_values, // Column-major format
+                    data: ResultPayload::Json(data_values),
                     total_rows,
                 };
 
@@ -559,8 +559,8 @@ impl TransportProtocol for WebSocketTransport {
         // they should be cached from the initial execute response
         // Data is in column-major format from Exasol
         Ok(ResultData {
-            columns: vec![],       // Caller must cache columns from execute
-            data: fetch_data.data, // Column-major format
+            columns: vec![],
+            data: ResultPayload::Json(fetch_data.data),
             total_rows: fetch_data.num_rows,
         })
     }
@@ -712,7 +712,7 @@ impl TransportProtocol for WebSocketTransport {
 
                 let data = ResultData {
                     columns,
-                    data: data_values, // Column-major format
+                    data: ResultPayload::Json(data_values),
                     total_rows,
                 };
 

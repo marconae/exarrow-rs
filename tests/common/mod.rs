@@ -145,10 +145,19 @@ pub fn get_test_connection_string() -> String {
     )
 }
 
+/// Build a connection string for a specific transport type.
+///
+/// Appends `&transport=<transport>` to the base connection string.
+#[allow(dead_code)]
+pub fn get_test_connection_string_with_transport(transport: &str) -> String {
+    format!("{}&transport={}", get_test_connection_string(), transport)
+}
+
 /// Establish a test connection to Exasol.
 ///
 /// Creates a new connection using the test configuration (from environment
-/// variables or defaults). This is the primary helper for integration tests.
+/// variables or defaults). Uses the default transport (native when the `native`
+/// feature is enabled, websocket otherwise).
 ///
 /// # Returns
 ///
@@ -157,18 +166,7 @@ pub fn get_test_connection_string() -> String {
 /// # Errors
 ///
 /// Returns an error if the connection cannot be established.
-///
-/// # Example
-///
-/// ```ignore
-/// #[tokio::test]
-/// #[ignore]
-/// async fn test_something() {
-///     let conn = get_test_connection().await.expect("Failed to connect");
-///     // Use connection...
-///     conn.close().await.expect("Failed to close");
-/// }
-/// ```
+#[allow(dead_code)]
 pub async fn get_test_connection() -> Result<Connection, exarrow_rs::error::ExasolError> {
     let driver = Driver::new();
     let conn_string = get_test_connection_string();
@@ -180,6 +178,52 @@ pub async fn get_test_connection() -> Result<Connection, exarrow_rs::error::Exas
             Ok(conn) => return Ok(conn),
             Err(e) => {
                 eprintln!("Connection attempt {}/5 failed: {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 5 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    Err(exarrow_rs::error::ExasolError::Connection(
+        last_error.unwrap(),
+    ))
+}
+
+/// Establish a test connection using a specific transport.
+///
+/// Creates a connection that explicitly uses the given transport type,
+/// regardless of the default feature flags.
+///
+/// # Arguments
+///
+/// * `transport` - Transport type: "native" or "websocket"
+///
+/// # Returns
+///
+/// A connected `Connection` instance.
+///
+/// # Errors
+///
+/// Returns an error if the connection cannot be established.
+#[allow(dead_code)]
+pub async fn get_test_connection_with_transport(
+    transport: &str,
+) -> Result<Connection, exarrow_rs::error::ExasolError> {
+    let driver = Driver::new();
+    let conn_string = get_test_connection_string_with_transport(transport);
+
+    let mut last_error = None;
+    for attempt in 1..=5u32 {
+        let database = driver.open(&conn_string)?;
+        match database.connect().await {
+            Ok(conn) => return Ok(conn),
+            Err(e) => {
+                eprintln!(
+                    "Connection attempt {}/5 ({}) failed: {}",
+                    attempt, transport, e
+                );
                 last_error = Some(e);
                 if attempt < 5 {
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -270,26 +314,36 @@ macro_rules! skip_if_no_exasol {
     };
 }
 
-/// Generate a unique test schema name.
+/// Generate a unique test object name.
 ///
-/// Creates a schema name with a timestamp to avoid conflicts when
-/// multiple test runs happen concurrently.
+/// Uses a nanosecond timestamp plus a process-local counter so names stay
+/// unique even when multiple tests start within the same clock tick.
+pub fn generate_unique_test_name(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_nanos();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+
+    format!("{}_{}_{}_{}", prefix, pid, timestamp, counter)
+}
+
+/// Generate a unique test schema name.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let schema = generate_test_schema_name();
-/// // Returns something like: "TEST_INTEGRATION_1700000000123"
+/// // Returns something like: "TEST_INTEGRATION_12345_1700000000123456789_0"
 /// ```
 pub fn generate_test_schema_name() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_millis();
-
-    format!("TEST_INTEGRATION_{}", timestamp)
+    generate_unique_test_name("TEST_INTEGRATION")
 }
 
 #[cfg(test)]
@@ -351,7 +405,7 @@ mod tests {
 
         assert!(schema1.starts_with("TEST_INTEGRATION_"));
         assert!(schema2.starts_with("TEST_INTEGRATION_"));
-        // Should be unique (different timestamps or at least monotonic)
+        assert_ne!(schema1, schema2);
         assert!(schema1.len() > 17); // "TEST_INTEGRATION_" is 17 chars
     }
 }

@@ -161,6 +161,14 @@ jobs:
           cargo llvm-cov --no-report --features ffi --test integration_tests -- --test-threads=1
           cargo llvm-cov report --lcov --output-path lcov-integration.info
 
+      - name: Run websocket parity integration tests
+        env:
+          REQUIRE_EXASOL: "1"
+        run: cargo test --features 'ffi websocket' --test websocket_integration_tests -- --test-threads=1
+
+      - name: Check websocket-only test build
+        run: cargo test --no-default-features --features websocket --tests --no-run
+
       - name: Build FFI library for driver manager tests
         run: cargo build --release --features ffi
 

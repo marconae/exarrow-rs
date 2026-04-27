@@ -42,15 +42,21 @@
 pub mod deserialize;
 pub mod http_transport;
 pub mod messages;
+#[cfg(feature = "native")]
+pub mod native;
 pub mod protocol;
+#[cfg(feature = "websocket")]
 pub mod websocket;
 
 // Re-export commonly used types
 pub use http_transport::{DataPipe, HttpTransportClient, TlsCertificate};
-pub use messages::{ColumnInfo, DataType, ResultData, ResultSetHandle, SessionInfo};
+pub use messages::{ColumnInfo, DataType, ResultData, ResultPayload, ResultSetHandle, SessionInfo};
+#[cfg(feature = "native")]
+pub use native::NativeTcpTransport;
 pub use protocol::{
     ConnectionParams, Credentials, PreparedStatementHandle, QueryResult, TransportProtocol,
 };
+#[cfg(feature = "websocket")]
 pub use websocket::WebSocketTransport;
 
 #[cfg(test)]
@@ -59,16 +65,25 @@ mod tests {
 
     #[test]
     fn test_module_exports() {
-        // Verify that key types are exported and accessible
         let _params = ConnectionParams::new("localhost".to_string(), 8563);
         let _creds = Credentials::new("user".to_string(), "pass".to_string());
-        let _transport = WebSocketTransport::new();
         let _handle = ResultSetHandle::new(1);
+    }
+
+    #[cfg(feature = "websocket")]
+    #[test]
+    fn test_websocket_transport_export() {
+        let _transport = WebSocketTransport::new();
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn test_native_transport_export() {
+        let _transport = NativeTcpTransport::new();
     }
 
     #[test]
     fn test_prepared_statement_handle_export() {
-        // Verify PreparedStatementHandle is exported and accessible
         let _handle = PreparedStatementHandle::new(1, 0, vec![], vec![]);
     }
 }

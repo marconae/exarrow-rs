@@ -16,7 +16,7 @@ Exasol lacks an Arrow-native driver. Existing connectors require row-based data 
 
 ## Core Capabilities
 
-1. **ADBC-compatible database connectivity** — standard Driver/Database/Connection/Statement hierarchy over Exasol's WebSocket protocol
+1. **ADBC-compatible database connectivity** — standard Driver/Database/Connection/Statement hierarchy over Exasol's native TCP protocol (default) or WebSocket protocol (opt-in fallback)
 2. **Bulk import/export via HTTP tunneling** — high-throughput data transfer for CSV, Parquet, and Arrow RecordBatch formats with parallel file support
 3. **Arrow-native type conversion** — bidirectional mapping between Exasol and Arrow type systems with precision preservation
 4. **FFI export for driver manager integration** — cdylib build target enabling any ADBC driver manager to load and use the driver
@@ -37,6 +37,7 @@ Exasol lacks an Arrow-native driver. Existing connectors require row-based data 
 | RecordBatch | Arrow's unit of columnar data: a collection of equal-length arrays with a shared schema |
 | EXA protocol | Exasol's WebSocket JSON protocol for commands and query execution (default port 8563) |
 | HTTP tunneling | Reverse-connection pattern where the client opens an outbound TCP connection that Exasol's SQLProcess connects back through for bulk data transfer |
+| Native TCP protocol | Exasol's binary protocol over TCP with ChaCha20 stream encryption, little-endian framing, and direct binary result sets (default transport) |
 | cdylib | Rust C-compatible dynamic library used by ADBC driver managers to load the driver |
 
 ---
@@ -47,10 +48,11 @@ Exasol lacks an Arrow-native driver. Existing connectors require row-based data 
 |-------|------------|---------|
 | Language | Rust (2021 edition) | Systems-level performance, memory safety |
 | Async runtime | Tokio 1.42 | Multi-threaded async I/O |
-| WebSocket | tokio-tungstenite 0.28 | Exasol protocol transport with TLS |
+| WebSocket | tokio-tungstenite 0.28 (optional) | Exasol WebSocket transport with TLS (opt-in fallback) |
 | Arrow | arrow 57.1 / parquet 57.1 | Columnar data format and Parquet I/O |
 | TLS | rustls 0.23 / rcgen 0.13 | Connection encryption and ad-hoc certificate generation for HTTP tunnels |
 | Crypto | aws-lc-rs 1 | RSA encryption for Exasol password authentication |
+| Stream cipher | chacha20 0.9 / cipher 0.4 | ChaCha20 encryption for native TCP protocol |
 | Serialization | serde / serde_json | Exasol WebSocket JSON protocol |
 | ADBC FFI | adbc_core / adbc_ffi 0.23 (optional) | C FFI bindings for driver manager integration |
 | Testing | cargo test / mockall 0.14 | Unit and integration testing with mocking |
@@ -59,12 +61,14 @@ Exasol lacks an Arrow-native driver. Existing connectors require row-based data 
 
 ```bash
 # Build
-cargo build                              # Debug build
+cargo build                              # Debug build (native protocol, default)
+cargo build --no-default-features --features websocket  # WebSocket-only build
 cargo build --release --features ffi     # Release with FFI cdylib
 
 # Test
 cargo test --lib                         # Unit tests
 cargo test --test integration_tests      # Integration tests (requires Exasol)
+cargo test --test native_protocol_tests  # Native protocol tests (requires Exasol)
 cargo test --test driver_manager_tests   # Driver manager tests
 cargo test --test import_export_tests -- --ignored  # Import/export tests (requires Exasol)
 
@@ -75,6 +79,15 @@ cargo clippy --all-targets --all-features -- -W clippy::all  # Lint (zero warnin
 # Gather Code Coverage
 cargo llvm-cov
 ```
+
+## Feature Flags
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `native` | Yes | Native TCP binary protocol transport (ChaCha20 encryption, little-endian framing) |
+| `websocket` | No | WebSocket JSON protocol transport (opt-in fallback, requires `tokio-tungstenite`) |
+| `ffi` | No | ADBC FFI cdylib for driver manager integration |
+| `benchmark` | No | Benchmarking tools and data generation |
 
 ## Repository Structure
 
@@ -93,7 +106,7 @@ tests/             # Integration test suites (integration_tests, driver_manager_
 Layered architecture following the ADBC Driver hierarchy: **Driver -> Database -> Connection -> Statement**.
 
 - **ADBC layer** (`adbc/`) is the public API entry point. Driver creates Databases, Databases create Connections, Connections execute Statements.
-- **Transport layer** (`transport/`) handles the Exasol WebSocket protocol and HTTP tunneling for bulk transfers. Connection owns transport exclusively (no shared state).
+- **Transport layer** (`transport/`) provides two protocol backends: the native TCP transport (`transport/native/`, default) using Exasol's binary protocol with ChaCha20 encryption, and the WebSocket transport (`transport/ws/`, opt-in via `transport=websocket`) using JSON over WebSocket. Both share HTTP tunneling for bulk transfers. Connection owns transport exclusively (no shared state).
 - **Data layer** (`import/`, `export/`, `arrow_conversion/`) handles format conversion and bulk data transfer. Statement is pure data; all execution flows through Connection.
 - All I/O is async-first via Tokio. Import/Export uses reverse-connection HTTP tunneling with the EXA protocol handshake.
 
@@ -107,7 +120,7 @@ Layered architecture following the ADBC Driver hierarchy: **Driver -> Database -
 
 | Service | Purpose | Failure Impact |
 |---------|---------|----------------|
-| Exasol Database | Target database (WebSocket API on port 8563) | All operations fail — the driver has no offline mode |
+| Exasol Database | Target database (native TCP or WebSocket API on port 8563) | All operations fail — the driver has no offline mode |
 | Docker | Local development and testing (`exasol/docker-db:latest`) | Cannot run integration tests locally |
 | GitHub Actions | CI/CD pipeline | No automated testing or release builds |
 | Codecov | Coverage reporting | No coverage metrics, CI still passes |

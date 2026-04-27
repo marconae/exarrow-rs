@@ -45,7 +45,9 @@ use arrow::array::{
     Array, Int32Array, ListArray, RecordBatch, RecordBatchReader, StringArray, StructArray,
 };
 use arrow::datatypes::{DataType, Field, Schema};
-use common::{get_host, get_password, get_port, get_user, is_exasol_available};
+use common::{
+    generate_unique_test_name, get_host, get_password, get_port, get_user, is_exasol_available,
+};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -632,13 +634,7 @@ fn test_driver_manager_execute_update() {
     let mut conn = db.new_connection().expect("Failed to create connection");
 
     // Create a unique schema name for this test
-    let schema_name = format!(
-        "TEST_DM_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_DM");
 
     // Create schema
     {
@@ -961,13 +957,7 @@ fn test_bulk_ingest_create() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_INGEST_CREATE_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_INGEST_CREATE");
 
     // Create schema
     {
@@ -1050,13 +1040,7 @@ fn test_bulk_ingest_append() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_INGEST_APPEND_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_INGEST_APPEND");
 
     // Create schema and table
     {
@@ -1125,13 +1109,7 @@ fn test_bulk_ingest_replace() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_INGEST_REPLACE_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_INGEST_REPLACE");
 
     // Create schema and initial table with data
     {
@@ -1224,13 +1202,7 @@ fn test_bulk_ingest_create_append() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_INGEST_CRAPPEND_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_INGEST_CRAPPEND");
 
     // Create schema
     {
@@ -1312,13 +1284,7 @@ fn test_transaction_commit() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_TXN_COMMIT_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_TXN_COMMIT");
 
     // Create schema and table with autocommit on (default)
     {
@@ -1403,13 +1369,7 @@ fn test_transaction_rollback() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_TXN_ROLLBACK_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_TXN_ROLLBACK");
 
     // Create schema and table with autocommit on
     {
@@ -1673,13 +1633,7 @@ fn test_driver_manager_get_objects() {
 
     setup_driver_manager_conn!(_driver, _db, conn);
 
-    let schema_name = format!(
-        "TEST_GET_OBJECTS_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_GET_OBJECTS");
 
     // Create test schema and table
     {
@@ -2196,13 +2150,7 @@ fn test_get_table_schema_timestamp_with_precision() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_TS_PREC_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_TS_PREC");
 
     // Create schema and table with TIMESTAMP(3) column
     {
@@ -2284,13 +2232,7 @@ fn test_get_table_schema_all_types() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_ALL_TYPES_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_ALL_TYPES");
 
     // Create schema
     {
@@ -2393,13 +2335,7 @@ fn test_query_timestamp_with_local_time_zone() {
 
     let mut conn = db.new_connection().expect("Failed to create connection");
 
-    let schema_name = format!(
-        "TEST_TS_TZ_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_TS_TZ");
 
     // Create schema
     {
@@ -2464,13 +2400,7 @@ fn test_bind_execute_update() {
 
     setup_driver_manager_conn!(_driver, _db, conn);
 
-    let schema_name = format!(
-        "TEST_BIND_EXEC_UPD_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_BIND_EXEC_UPD");
 
     // Create schema and table
     {
@@ -2589,13 +2519,7 @@ fn test_bind_execute_query() {
 
     setup_driver_manager_conn!(_driver, _db, conn);
 
-    let schema_name = format!(
-        "TEST_BIND_EXEC_QRY_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_BIND_EXEC_QRY");
 
     {
         let mut stmt = conn.new_statement().expect("Failed to create statement");
@@ -2734,13 +2658,7 @@ fn test_autocommit_toggle_with_dml() {
 
     setup_driver_manager_conn!(_driver, _db, conn);
 
-    let schema_name = format!(
-        "TEST_AC_DML_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    );
+    let schema_name = generate_unique_test_name("TEST_AC_DML");
 
     // Create schema and table with autocommit on (default)
     {

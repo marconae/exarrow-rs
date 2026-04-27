@@ -6,9 +6,9 @@
 
 exarrow-rs can be used with ADBC driver managers via its C FFI interface.
 
-## Building with FFI Support
+## Building the Driver
 
-Enable the `ffi` feature to build the C-compatible shared library:
+Enable the `ffi` feature to build the C-compatible shared library. The `ffi` feature automatically includes the native TCP transport:
 
 ```bash
 cargo build --release --features ffi
@@ -18,6 +18,14 @@ This produces a shared library:
 - Linux: `target/release/libexarrow_rs.so`
 - macOS: `target/release/libexarrow_rs.dylib`
 - Windows: `target/release/exarrow_rs.dll`
+
+The shared library uses the **native TCP protocol** by default. To also include the WebSocket transport in the binary (allowing runtime selection via `transport=websocket` in the connection URI):
+
+```bash
+cargo build --release --features 'ffi websocket'
+```
+
+The ADBC Driver Foundry and other downstream build systems should use `--features ffi`, which ensures the native protocol is always compiled in.
 
 ## Connection URI
 

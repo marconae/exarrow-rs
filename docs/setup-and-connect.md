@@ -62,6 +62,7 @@ All parameters are set via URL query string (`?key=value&key2=value2`).
 
 | Parameter | Aliases | Default | Description |
 |---|---|---|---|
+| `transport` | — | `native` | Transport protocol: `native` (default) or `websocket` (requires `websocket` feature) |
 | `tls` | `ssl`, `use_tls` | `true` | Enable TLS/SSL encryption |
 | `validate_certificate` | `verify_certificate`, `validateservercertificate` | `true` | Validate the server's TLS certificate |
 | `certificate_fingerprint` | `certificatefingerprint` | — | Pin connection to a specific server certificate (SHA-256 hex of DER cert) |
@@ -139,4 +140,58 @@ Configure connection and query timeouts via URL parameters:
 let database = driver.open(
     "exasol://user:password@host:8563?connection_timeout=60&query_timeout=600"
 )?;
+```
+
+## Transport Protocol
+
+exarrow-rs connects to Exasol using the **native TCP protocol** by default. The native protocol uses Exasol's binary wire format and parses result sets directly into Arrow with no intermediate JSON serialization, delivering significantly higher throughput than the WebSocket transport.
+
+### Native Protocol (Default)
+
+No configuration is needed. The native protocol is selected automatically when the `native` feature is enabled (which it is by default):
+
+```
+exasol://user:password@host:8563
+```
+
+The native protocol:
+- Sends and receives Exasol's binary wire format over a TLS TCP connection
+- Parses binary result sets in a single pass directly into Arrow arrays
+- Uses ChaCha20 stream encryption on top of TLS for message-level security
+- Is the recommended transport for all production use
+
+### WebSocket Protocol (Alternative)
+
+The WebSocket transport connects over the WebSocket protocol and exchanges JSON messages. It is provided as an opt-in alternative for compatibility or debugging.
+
+Enable the `websocket` feature in your `Cargo.toml`:
+
+```toml
+[dependencies]
+exarrow-rs = { version = "0.10", features = ["websocket"] }
+```
+
+Select WebSocket for a specific connection via the `transport` parameter:
+
+```
+exasol://user:password@host:8563?transport=websocket
+```
+
+### Feature Flags and Build Options
+
+| Feature | Default | Included in |
+|---------|---------|-------------|
+| `native` | yes | default build, `--features ffi` |
+| `websocket` | no | opt-in: `--features websocket` |
+
+Build with both transports compiled in (transport selected at runtime via connection string):
+
+```bash
+cargo build --features websocket
+```
+
+Build a WebSocket-only binary (no native protocol):
+
+```bash
+cargo build --no-default-features --features websocket
 ```

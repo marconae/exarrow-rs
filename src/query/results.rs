@@ -4,7 +4,7 @@
 //! streaming result sets and metadata.
 
 use crate::error::{ConversionError, QueryError};
-use crate::transport::messages::{ColumnInfo, ResultData, ResultSetHandle};
+use crate::transport::messages::{ColumnInfo, ResultData, ResultPayload, ResultSetHandle};
 use crate::transport::protocol::QueryResult as TransportQueryResult;
 use crate::transport::TransportProtocol;
 use crate::types::TypeMapper;
@@ -109,22 +109,15 @@ impl ResultSet {
 
                 let metadata = QueryMetadata::new(Arc::clone(&schema), Some(data.total_rows));
 
-                // Convert initial data to RecordBatch
-                // Note: data.data is in column-major format (each inner array is a column)
-                let batches = if !data.data.is_empty() {
-                    vec![Self::column_major_to_record_batch(&data, &schema)
-                        .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?]
-                } else {
+                let num_rows_received = data.data.num_rows() as i64;
+
+                let batches = if data.data.is_empty() {
                     Vec::new()
+                } else {
+                    vec![Self::payload_to_record_batch(&data, &schema)
+                        .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?]
                 };
 
-                // Result is complete if all data was in initial response OR no handle provided
-                // For column-major data, the number of rows is determined by the length of the first column
-                let num_rows_received = if data.data.is_empty() {
-                    0
-                } else {
-                    data.data[0].len() as i64
-                };
                 let complete = handle.is_none() || data.total_rows == num_rows_received;
 
                 Ok(Self {
@@ -218,15 +211,17 @@ impl ResultSet {
                             }
 
                             let batch =
-                                Self::column_major_to_record_batch(&result_data, &metadata.schema)
+                                Self::payload_to_record_batch(&result_data, &metadata.schema)
                                     .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
 
                             all_batches.push(batch);
 
-                            // Check if we've fetched everything
-                            if result_data.total_rows > 0
+                            // Use the known total from query metadata so that per-batch
+                            // total_rows values from the transport don't cause early exit.
+                            let known_total = metadata.total_rows.unwrap_or(0);
+                            if known_total > 0
                                 && all_batches.iter().map(|b| b.num_rows()).sum::<usize>()
-                                    >= result_data.total_rows as usize
+                                    >= known_total as usize
                             {
                                 *complete = true;
                                 break;
@@ -311,12 +306,18 @@ impl ResultSet {
         TypeMapper::exasol_to_arrow(&exasol_type, true)
     }
 
-    /// Convert row-major result data to RecordBatch.
-    ///
-    /// Data is expected in row-major format where `data[row_idx][col_idx]` contains
-    /// the value at that position.
-    ///
-    /// Example: For a result with 2 columns (id, name) and 3 rows:
+    /// Convert a ResultData payload to RecordBatch, handling both JSON and Arrow variants.
+    fn payload_to_record_batch(
+        data: &ResultData,
+        schema: &Arc<Schema>,
+    ) -> Result<RecordBatch, ConversionError> {
+        match &data.data {
+            ResultPayload::Arrow(batch) => Ok(batch.clone()),
+            ResultPayload::Json(_) => Self::column_major_to_record_batch(data, schema),
+        }
+    }
+
+    /// Convert row-major JSON result data to RecordBatch.
     fn column_major_to_record_batch(
         data: &ResultData,
         schema: &Arc<Schema>,
@@ -324,8 +325,12 @@ impl ResultSet {
         use arrow::array::*;
         use serde_json::Value;
 
-        if data.data.is_empty() {
-            // Create empty batch with schema
+        let rows = match &data.data {
+            ResultPayload::Json(rows) => rows,
+            ResultPayload::Arrow(batch) => return Ok(batch.clone()),
+        };
+
+        if rows.is_empty() {
             let empty_arrays: Vec<Arc<dyn Array>> = schema
                 .fields()
                 .iter()
@@ -336,12 +341,10 @@ impl ResultSet {
                 .map_err(|e| ConversionError::ArrowError(e.to_string()));
         }
 
-        // Extract column values from row-major data
         let num_columns = schema.fields().len();
         let column_values: Vec<Vec<&Value>> = (0..num_columns)
             .map(|col_idx| {
-                data.data
-                    .iter()
+                rows.iter()
                     .map(|row| row.get(col_idx).unwrap_or(&Value::Null))
                     .collect()
             })
@@ -704,7 +707,7 @@ impl ResultSetIterator {
             return Ok(None);
         }
 
-        let batch = ResultSet::column_major_to_record_batch(&result_data, &self.metadata.schema)
+        let batch = ResultSet::payload_to_record_batch(&result_data, &self.metadata.schema)
             .map_err(|e| QueryError::ExecutionFailed(e.to_string()))?;
 
         Ok(Some(batch))
@@ -772,7 +775,7 @@ impl Iterator for ResultSetIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::messages::{ColumnInfo, DataType};
+    use crate::transport::messages::{ColumnInfo, DataType, ResultPayload};
     use crate::transport::protocol::{
         PreparedStatementHandle, QueryResult as TransportQueryResult,
     };
@@ -848,10 +851,10 @@ mod tests {
                     },
                 },
             ],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(1), serde_json::json!("Alice")],
                 vec![serde_json::json!(2), serde_json::json!("Bob")],
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -884,7 +887,7 @@ mod tests {
         // Row 1: [2, "Bob", false]
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![
                     serde_json::json!(1),
                     serde_json::json!("Alice"),
@@ -895,7 +898,7 @@ mod tests {
                     serde_json::json!("Bob"),
                     serde_json::json!(false),
                 ],
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -917,9 +920,9 @@ mod tests {
         // Row-major: one row with one value
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(42)], // Row 0: [42]
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -944,9 +947,9 @@ mod tests {
         // Row-major: one row with two values
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(42), serde_json::json!("hello")], // Row 0: [42, "hello"]
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -967,7 +970,7 @@ mod tests {
         // Row-major: ten rows, each with two values
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(1), serde_json::json!("Row 1")],
                 vec![serde_json::json!(2), serde_json::json!("Row 2")],
                 vec![serde_json::json!(3), serde_json::json!("Row 3")],
@@ -978,7 +981,7 @@ mod tests {
                 vec![serde_json::json!(8), serde_json::json!("Row 8")],
                 vec![serde_json::json!(9), serde_json::json!("Row 9")],
                 vec![serde_json::json!(10), serde_json::json!("Row 10")],
-            ],
+            ]),
             total_rows: 10,
         };
 
@@ -1668,12 +1671,12 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(1)],
                 vec![serde_json::json!(2)],
                 vec![serde_json::json!(null)],
                 vec![serde_json::json!(4)],
-            ],
+            ]),
             total_rows: 4,
         };
 
@@ -1703,11 +1706,11 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(9223372036854775807_i64)], // Max i64
                 vec![serde_json::json!(-9223372036854775808_i64)], // Min i64
                 vec![serde_json::json!(null)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -1735,12 +1738,12 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(1.23456)],
                 vec![serde_json::json!(-9.87654)],
                 vec![serde_json::json!(null)],
                 vec![serde_json::json!(0.0)],
-            ],
+            ]),
             total_rows: 4,
         };
 
@@ -1769,11 +1772,11 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(true)],
                 vec![serde_json::json!(false)],
                 vec![serde_json::json!(null)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -1801,11 +1804,11 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("1970-01-01")],
                 vec![serde_json::json!("2000-01-01")],
                 vec![serde_json::json!(null)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -1833,11 +1836,11 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("1970-01-01 00:00:00")],
                 vec![serde_json::json!("1970-01-01 01:00:00.123456")],
                 vec![serde_json::json!(null)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -1865,7 +1868,7 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![],
+            data: ResultPayload::Json(vec![]),
             total_rows: 0,
         };
 
@@ -1885,12 +1888,12 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("hello")],
                 vec![serde_json::json!("world")],
                 vec![serde_json::json!(null)],
                 vec![serde_json::json!("")], // Empty string
-            ],
+            ]),
             total_rows: 4,
         };
 
@@ -1920,9 +1923,9 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(123)], // Number should be converted to "123"
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -1946,11 +1949,11 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("123.45")],
                 vec![serde_json::json!("-67.89")],
                 vec![serde_json::json!(null)],
-            ],
+            ]),
             total_rows: 3,
         };
 
@@ -1978,9 +1981,9 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(100)], // Integer should be scaled
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -2004,9 +2007,9 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!(99.99)], // Float should be scaled
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -2030,10 +2033,10 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("invalid-date")],
                 vec![serde_json::json!(123)], // Non-string should become null
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -2059,10 +2062,10 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("not-a-timestamp")],
                 vec![serde_json::json!(12345)], // Non-string should become null
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -2087,10 +2090,10 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("not-a-bool")], // String is not a bool
                 vec![serde_json::json!(123)],          // Number is not a bool
-            ],
+            ]),
             total_rows: 2,
         };
 
@@ -2116,9 +2119,9 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("not-an-int")], // String is not parseable as int
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -2142,9 +2145,9 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![
+            data: ResultPayload::Json(vec![
                 vec![serde_json::json!("not-a-float")], // String is not parseable as float
-            ],
+            ]),
             total_rows: 1,
         };
 
@@ -2170,7 +2173,7 @@ mod tests {
 
         let data = ResultData {
             columns: vec![],
-            data: vec![vec![serde_json::json!("test_data")]],
+            data: ResultPayload::Json(vec![vec![serde_json::json!("test_data")]]),
             total_rows: 1,
         };
 
@@ -2203,7 +2206,7 @@ mod tests {
                     fraction: None,
                 },
             }],
-            data: vec![vec![serde_json::json!(1)]],
+            data: ResultPayload::Json(vec![vec![serde_json::json!(1)]]),
             total_rows: 1,
         };
 
@@ -2265,11 +2268,11 @@ mod tests {
                     },
                 },
             ],
-            data: vec![vec![
+            data: ResultPayload::Json(vec![vec![
                 serde_json::json!(1),
                 serde_json::json!("Alice"),
                 serde_json::json!(true),
-            ]],
+            ]]),
             total_rows: 1,
         };
 

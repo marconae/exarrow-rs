@@ -51,6 +51,9 @@ pub struct ConnectionParams {
     /// Client version
     pub client_version: String,
 
+    /// Transport type override (native or websocket)
+    pub transport: Option<String>,
+
     /// Additional connection attributes
     pub attributes: HashMap<String, String>,
 }
@@ -177,6 +180,7 @@ impl fmt::Debug for ConnectionParams {
             .field("certificate_fingerprint", &self.certificate_fingerprint)
             .field("client_name", &self.client_name)
             .field("client_version", &self.client_version)
+            .field("transport", &self.transport)
             .field("attributes", &self.attributes)
             .finish()
     }
@@ -208,6 +212,7 @@ pub struct ConnectionBuilder {
     certificate_fingerprint: Option<String>,
     client_name: Option<String>,
     client_version: Option<String>,
+    transport: Option<String>,
     attributes: HashMap<String, String>,
 }
 
@@ -228,6 +233,7 @@ impl ConnectionBuilder {
             certificate_fingerprint: None,
             client_name: None,
             client_version: None,
+            transport: None,
             attributes: HashMap::new(),
         }
     }
@@ -310,6 +316,12 @@ impl ConnectionBuilder {
         self
     }
 
+    /// Set the transport type (native or websocket).
+    pub fn transport(mut self, transport: &str) -> Self {
+        self.transport = Some(transport.to_string());
+        self
+    }
+
     /// Add a custom connection attribute.
     pub fn attribute(mut self, key: &str, value: &str) -> Self {
         self.attributes.insert(key.to_string(), value.to_string());
@@ -385,6 +397,7 @@ impl ConnectionBuilder {
             client_version: self
                 .client_version
                 .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            transport: self.transport,
             attributes: self.attributes,
         })
     }
@@ -540,6 +553,23 @@ fn apply_query_params(
             }
             "certificate_fingerprint" | "certificatefingerprint" => {
                 builder = builder.certificate_fingerprint(&value);
+            }
+            "transport" => {
+                let transport_lower = value.to_lowercase();
+                match transport_lower.as_str() {
+                    "native" | "websocket" => {
+                        builder = builder.transport(&transport_lower);
+                    }
+                    _ => {
+                        return Err(ConnectionError::InvalidParameter {
+                            parameter: "transport".to_string(),
+                            message: format!(
+                                "Invalid transport value: {}. Must be 'native' or 'websocket'",
+                                value
+                            ),
+                        });
+                    }
+                }
             }
             _ => {
                 // Store as custom attribute

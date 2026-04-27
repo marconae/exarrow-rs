@@ -265,6 +265,7 @@ impl From<serde_json::Error> for TransportError {
     }
 }
 
+#[cfg(feature = "websocket")]
 impl From<tokio_tungstenite::tungstenite::Error> for TransportError {
     fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
         TransportError::WebSocketError(err.to_string())

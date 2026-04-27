@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0
+
+- Native TCP protocol transport as the default, replacing WebSocket for query execution (16x throughput improvement). The native protocol uses Exasol's little-endian binary framing with ChaCha20 stream encryption and direct binary result set parsing.
+- Feature flags: `native` (default) and `websocket` (opt-in fallback). Build with `--no-default-features --features websocket` to use the WebSocket transport exclusively.
+- Connection string parameter `transport=native|websocket` to select transport at runtime when both features are compiled in.
+- WebSocket transport (`tokio-tungstenite`) is now an optional dependency, reducing binary size for native-only builds.
+- Zero-copy fetch optimization: wire bytes parse directly into Arrow builders in a single pass, eliminating the intermediate `ColumnData` allocation. DATE and TIMESTAMP columns convert to `Date32`/`TimestampMicrosecond` via integer arithmetic (no string formatting). Receive buffer is reused across fetches. Result: +36% throughput (900K → 1.22M rows/s), native now 3× faster than WebSocket.
+
 ## 0.9.0
 
 - Upgrade ADBC dependency from 0.22 to 0.23 (breaking: methods now return Box<dyn RecordBatchReader>)
