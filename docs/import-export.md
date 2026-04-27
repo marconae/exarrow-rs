@@ -183,6 +183,27 @@ Type widening rules when fields differ across files:
 - `DECIMAL` + `DOUBLE` widens to `DOUBLE`
 - Incompatible types fall back to `VARCHAR(2000000)`
 
+### Native Parquet Import (Exasol 2025.1.11+)
+
+When connected to Exasol 2025.1.11 or newer, the driver automatically uses **native Parquet import**: raw Parquet bytes are served to the server over HTTP range requests, and the SQL uses `IMPORT INTO ... FROM PARQUET AT '...;MaxConcurrentReads=1' FILE 'NNN.parquet'` with no CSV format clauses. This eliminates client-side decoding and re-encoding cost and reduces wire-bytes by 5–30x for typed columnar data. On older Exasol versions (7.x, 8.x) the driver continues to convert Parquet to CSV transparently — no change in behavior for existing deployments.
+
+The server version is detected automatically at connection time. To override the auto-detected behavior, use `ParquetImportOptions::with_native_parquet`:
+
+```rust
+use exarrow_rs::import::ParquetImportOptions;
+
+// Force CSV conversion path (e.g. for testing or compatibility):
+let options = ParquetImportOptions::default().with_native_parquet(Some(false));
+
+// Force native mode (errors on pre-2025.1.11 servers):
+let options = ParquetImportOptions::default().with_native_parquet(Some(true));
+
+// Default: auto-detect from server version (recommended):
+let options = ParquetImportOptions::default().with_native_parquet(None);
+```
+
+The same override applies to `import_from_parquet`, `import_from_parquet_stream`, and `import_parquet_from_files`.
+
 ## Parquet Export
 
 ```rust

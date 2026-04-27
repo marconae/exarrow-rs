@@ -52,6 +52,17 @@ impl Compression {
     }
 }
 
+/// File format for an IMPORT statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportFormat {
+    /// CSV format. Format options (encoding, separators, etc.) apply.
+    #[default]
+    Csv,
+    /// Native Parquet format. The server detects the schema from the file;
+    /// CSV format options and compression suffixes do not apply.
+    Parquet,
+}
+
 /// Trim mode options for CSV import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrimMode {
@@ -164,6 +175,8 @@ pub struct ImportQuery {
     compression: Compression,
     /// Maximum number of invalid rows before failure
     reject_limit: Option<u32>,
+    /// File format (CSV or Parquet)
+    format: ImportFormat,
 }
 
 impl ImportQuery {
@@ -190,6 +203,7 @@ impl ImportQuery {
             trim: TrimMode::default(),
             compression: Compression::default(),
             reject_limit: None,
+            format: ImportFormat::default(),
         }
     }
 
@@ -325,6 +339,20 @@ impl ImportQuery {
         self
     }
 
+    /// Set the file format for the import.
+    ///
+    /// When set to `ImportFormat::Parquet`, the generated SQL emits
+    /// `FROM PARQUET`, the file extension becomes `.parquet` regardless of
+    /// the configured compression, and the CSV format-options clause is
+    /// omitted (the server reads the schema from the Parquet file).
+    ///
+    /// # Arguments
+    /// * `format` - File format
+    pub fn with_format(mut self, format: ImportFormat) -> Self {
+        self.format = format;
+        self
+    }
+
     /// Set multiple file entries for parallel import.
     ///
     /// This method enables multi-file IMPORT statements where each file
@@ -342,17 +370,17 @@ impl ImportQuery {
         self
     }
 
-    /// Get the configured file name with appropriate extension for compression.
+    /// Get the configured file name with the appropriate extension.
+    ///
+    /// For `ImportFormat::Parquet`, the extension is always `.parquet` and
+    /// any configured compression suffix is bypassed. For `ImportFormat::Csv`,
+    /// the extension reflects the configured `Compression`.
     fn get_file_name(&self) -> String {
-        // If compression is set and file_name doesn't already have the right extension
-        let base_name = self
-            .file_name
-            .trim_end_matches(".csv")
-            .trim_end_matches(".gz")
-            .trim_end_matches(".bz2")
-            .trim_end_matches(".csv");
-
-        format!("{}{}", base_name, self.compression.extension())
+        let base_name = strip_known_extensions(&self.file_name);
+        match self.format {
+            ImportFormat::Parquet => format!("{}.parquet", base_name),
+            ImportFormat::Csv => format!("{}{}", base_name, self.compression.extension()),
+        }
     }
 
     /// Build the complete IMPORT SQL statement.
@@ -378,10 +406,16 @@ impl ImportQuery {
             sql.push(')');
         }
 
-        // FROM CSV clause - either multi-file or single-file mode
+        // FROM <FORMAT> clause - either multi-file or single-file mode.
+        // The format keyword (CSV vs PARQUET) and per-URL suffix differ;
+        // the rest of the address/PUBLIC KEY/FILE structure is shared.
+        let is_parquet = matches!(self.format, ImportFormat::Parquet);
+        let format_keyword = if is_parquet { "PARQUET" } else { "CSV" };
+
         if let Some(ref entries) = self.file_entries {
-            // Multi-file mode: FROM CSV AT 'addr1' FILE '001.csv' AT 'addr2' FILE '002.csv' ...
-            sql.push_str("\nFROM CSV");
+            // Multi-file mode: FROM <FORMAT> AT 'addr1' FILE '001.csv' AT 'addr2' FILE '002.csv' ...
+            sql.push_str("\nFROM ");
+            sql.push_str(format_keyword);
 
             for entry in entries {
                 sql.push_str(" AT '");
@@ -393,6 +427,12 @@ impl ImportQuery {
                     sql.push_str("http://");
                 }
                 sql.push_str(&entry.address);
+                // The `;MaxConcurrentReads=1` suffix is appended INSIDE the
+                // quoted URL string for native Parquet imports, mirroring the
+                // JDBC reference driver's on-the-wire shape.
+                if is_parquet {
+                    sql.push_str(";MaxConcurrentReads=1");
+                }
                 sql.push('\'');
 
                 // PUBLIC KEY clause for this entry
@@ -408,8 +448,10 @@ impl ImportQuery {
                 sql.push('\'');
             }
         } else {
-            // Single-file mode: FROM CSV AT 'addr' FILE '001.csv'
-            sql.push_str("\nFROM CSV AT '");
+            // Single-file mode: FROM <FORMAT> AT 'addr' FILE '001.csv'
+            sql.push_str("\nFROM ");
+            sql.push_str(format_keyword);
+            sql.push_str(" AT '");
 
             // Use https:// if public_key is set, otherwise http://
             if self.public_key.is_some() {
@@ -420,6 +462,11 @@ impl ImportQuery {
 
             if let Some(ref addr) = self.address {
                 sql.push_str(addr);
+            }
+            // The `;MaxConcurrentReads=1` suffix is appended INSIDE the
+            // quoted URL string for native Parquet imports.
+            if is_parquet {
+                sql.push_str(";MaxConcurrentReads=1");
             }
             sql.push('\'');
 
@@ -436,61 +483,81 @@ impl ImportQuery {
             sql.push('\'');
         }
 
-        // Format options
-        sql.push_str("\nENCODING = '");
-        sql.push_str(&self.encoding);
-        sql.push('\'');
-
-        sql.push_str("\nCOLUMN SEPARATOR = '");
-        sql.push(self.column_separator);
-        sql.push('\'');
-
-        sql.push_str("\nCOLUMN DELIMITER = '");
-        sql.push(self.column_delimiter);
-        sql.push('\'');
-
-        sql.push_str("\nROW SEPARATOR = '");
-        sql.push_str(self.row_separator.to_sql());
-        sql.push('\'');
-
-        // Optional SKIP
-        if self.skip > 0 {
-            sql.push_str("\nSKIP = ");
-            sql.push_str(&self.skip.to_string());
-        }
-
-        // Optional NULL value
-        if let Some(ref null_val) = self.null_value {
-            sql.push_str("\nNULL = '");
-            sql.push_str(null_val);
+        // Format options apply ONLY to CSV. For PARQUET the server reads the
+        // schema from the file directly, so emitting any of these clauses
+        // (ENCODING, COLUMN SEPARATOR, COLUMN DELIMITER, ROW SEPARATOR, SKIP,
+        // NULL, TRIM, REJECT LIMIT) would either be rejected or ignored.
+        if !is_parquet {
+            sql.push_str("\nENCODING = '");
+            sql.push_str(&self.encoding);
             sql.push('\'');
-        }
 
-        // Optional TRIM
-        if let Some(trim_sql) = self.trim.to_sql() {
-            sql.push_str("\nTRIM = '");
-            sql.push_str(trim_sql);
+            sql.push_str("\nCOLUMN SEPARATOR = '");
+            sql.push(self.column_separator);
             sql.push('\'');
-        }
 
-        // Optional REJECT LIMIT
-        if let Some(limit) = self.reject_limit {
-            sql.push_str("\nREJECT LIMIT ");
-            sql.push_str(&limit.to_string());
+            sql.push_str("\nCOLUMN DELIMITER = '");
+            sql.push(self.column_delimiter);
+            sql.push('\'');
+
+            sql.push_str("\nROW SEPARATOR = '");
+            sql.push_str(self.row_separator.to_sql());
+            sql.push('\'');
+
+            // Optional SKIP
+            if self.skip > 0 {
+                sql.push_str("\nSKIP = ");
+                sql.push_str(&self.skip.to_string());
+            }
+
+            // Optional NULL value
+            if let Some(ref null_val) = self.null_value {
+                sql.push_str("\nNULL = '");
+                sql.push_str(null_val);
+                sql.push('\'');
+            }
+
+            // Optional TRIM
+            if let Some(trim_sql) = self.trim.to_sql() {
+                sql.push_str("\nTRIM = '");
+                sql.push_str(trim_sql);
+                sql.push('\'');
+            }
+
+            // Optional REJECT LIMIT
+            if let Some(limit) = self.reject_limit {
+                sql.push_str("\nREJECT LIMIT ");
+                sql.push_str(&limit.to_string());
+            }
         }
 
         sql
     }
 
-    /// Get file name with compression extension for multi-file entries.
+    /// Get file name with the appropriate extension for multi-file entries.
+    ///
+    /// Mirrors `get_file_name`'s format-aware extension policy.
     fn get_file_name_for(&self, base_name: &str) -> String {
-        let base = base_name
-            .trim_end_matches(".csv")
-            .trim_end_matches(".gz")
-            .trim_end_matches(".bz2")
-            .trim_end_matches(".csv");
+        let base = strip_known_extensions(base_name);
+        match self.format {
+            ImportFormat::Parquet => format!("{}.parquet", base),
+            ImportFormat::Csv => format!("{}{}", base, self.compression.extension()),
+        }
+    }
+}
 
-        format!("{}{}", base, self.compression.extension())
+fn strip_known_extensions(name: &str) -> &str {
+    let mut current = name;
+    loop {
+        let stripped = current
+            .strip_suffix(".gz")
+            .or_else(|| current.strip_suffix(".bz2"))
+            .or_else(|| current.strip_suffix(".csv"))
+            .or_else(|| current.strip_suffix(".parquet"));
+        match stripped {
+            Some(next) if next.len() < current.len() => current = next,
+            _ => return current,
+        }
     }
 }
 
@@ -805,5 +872,92 @@ mod tests {
         for part in expected_parts {
             assert!(sql.contains(part), "SQL should contain: {}", part);
         }
+    }
+
+    #[test]
+    fn test_import_query_format_parquet_single_file() {
+        let sql = ImportQuery::new("my_table")
+            .at_address("10.0.0.5:8563")
+            .with_format(ImportFormat::Parquet)
+            .build();
+        assert!(sql.contains("FROM PARQUET AT 'http://10.0.0.5:8563;MaxConcurrentReads=1'"));
+        assert!(sql.contains("FILE '001.parquet'"));
+        assert!(!sql.contains("ENCODING"));
+    }
+
+    #[test]
+    fn test_import_query_format_parquet_multi_file() {
+        let entries = vec![
+            ImportFileEntry::new("10.0.0.5:8563".to_string(), "001.parquet".to_string(), None),
+            ImportFileEntry::new("10.0.0.6:8564".to_string(), "002.parquet".to_string(), None),
+        ];
+        let sql = ImportQuery::new("my_table")
+            .with_files(entries)
+            .with_format(ImportFormat::Parquet)
+            .build();
+        assert!(sql.contains("FROM PARQUET"));
+        assert!(sql.contains("AT 'http://10.0.0.5:8563;MaxConcurrentReads=1'"));
+        assert!(sql.contains("AT 'http://10.0.0.6:8564;MaxConcurrentReads=1'"));
+        assert!(sql.contains("FILE '001.parquet'"));
+        assert!(sql.contains("FILE '002.parquet'"));
+        assert!(!sql.contains("MULTIPLE LOCAL FILES"));
+    }
+
+    #[test]
+    fn test_import_query_format_parquet_with_tls_emits_public_key() {
+        let sql = ImportQuery::new("t")
+            .at_address("10.0.0.5:8563")
+            .with_public_key("sha256//abc")
+            .with_format(ImportFormat::Parquet)
+            .build();
+        assert!(sql
+            .contains("AT 'https://10.0.0.5:8563;MaxConcurrentReads=1' PUBLIC KEY 'sha256//abc'"));
+    }
+
+    #[test]
+    fn test_import_query_format_parquet_omits_csv_format_options() {
+        let sql = ImportQuery::new("t")
+            .at_address("addr:1234")
+            .with_format(ImportFormat::Parquet)
+            .skip(2)
+            .null_value("NULL")
+            .trim(TrimMode::Trim)
+            .reject_limit(100)
+            .build();
+        for keyword in &[
+            "ENCODING",
+            "COLUMN SEPARATOR",
+            "COLUMN DELIMITER",
+            "ROW SEPARATOR",
+            "SKIP",
+            "NULL",
+            "TRIM",
+            "REJECT LIMIT",
+        ] {
+            assert!(
+                !sql.contains(keyword),
+                "SQL should NOT contain {} for Parquet format",
+                keyword
+            );
+        }
+    }
+
+    #[test]
+    fn test_import_query_parquet_ignores_compression() {
+        let sql = ImportQuery::new("t")
+            .at_address("addr:1234")
+            .with_format(ImportFormat::Parquet)
+            .compressed(Compression::Gzip)
+            .build();
+        assert!(sql.contains("FILE '001.parquet'"));
+        assert!(!sql.contains(".gz"));
+    }
+
+    #[test]
+    fn test_import_query_format_csv_unchanged() {
+        let sql = ImportQuery::new("t").at_address("192.168.1.1:8080").build();
+        assert!(sql.contains("FROM CSV AT 'http://192.168.1.1:8080'"));
+        assert!(sql.contains("ENCODING = 'UTF-8'"));
+        assert!(sql.contains("COLUMN SEPARATOR = ','"));
     }
 }

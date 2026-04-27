@@ -30,6 +30,7 @@
 pub mod auth;
 pub mod params;
 pub mod session;
+pub mod version;
 
 pub use auth::{AuthenticationHandler, Credentials};
 pub use params::{ConnectionBuilder, ConnectionParams};

@@ -2394,3 +2394,312 @@ async fn test_parquet_import_auto_create_nonexistent_schema_returns_error() {
 
     conn.close().await.expect("Failed to close connection");
 }
+
+// Section N: Native Parquet Import Integration Tests
+
+/// Helper that writes a small 3-row Parquet file (id INTEGER, name VARCHAR) and
+/// returns the path. Caller is responsible for keeping `TempDir` alive.
+fn write_small_parquet(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+
+    let path = dir.join(name);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let id_array = Int32Array::from(vec![1, 2, 3]);
+    let name_array = StringArray::from(vec![Some("Alice"), Some("Bob"), Some("Charlie")]);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(id_array), Arc::new(name_array)],
+    )
+    .expect("Failed to create RecordBatch");
+
+    let file = std::fs::File::create(&path).expect("Failed to create parquet file");
+    let props = WriterProperties::builder().build();
+    let mut writer =
+        ArrowWriter::try_new(file, schema, Some(props)).expect("Failed to create ArrowWriter");
+    writer.write(&batch).expect("Failed to write batch");
+    writer.close().expect("Failed to close ArrowWriter");
+    path
+}
+
+/// Helper that writes a 2-row Parquet file (id INTEGER, name VARCHAR) and returns
+/// the path. Used for multi-file tests where each file has distinct data.
+fn write_small_parquet_offset(
+    dir: &std::path::Path,
+    name: &str,
+    id_offset: i32,
+) -> std::path::PathBuf {
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
+
+    let path = dir.join(name);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let id_array = Int32Array::from(vec![id_offset, id_offset + 1]);
+    let name_array = StringArray::from(vec![
+        Some(format!("row_{}", id_offset).as_str()),
+        Some(format!("row_{}", id_offset + 1).as_str()),
+    ]);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(id_array), Arc::new(name_array)],
+    )
+    .expect("Failed to create RecordBatch");
+
+    let file = std::fs::File::create(&path).expect("Failed to create parquet file");
+    let props = WriterProperties::builder().build();
+    let mut writer =
+        ArrowWriter::try_new(file, schema, Some(props)).expect("Failed to create ArrowWriter");
+    writer.write(&batch).expect("Failed to write batch");
+    writer.close().expect("Failed to close ArrowWriter");
+    path
+}
+
+/// Helper to create and set up a test table with (id INTEGER, name VARCHAR(100)).
+async fn setup_id_name_table(conn: &mut Connection, schema_name: &str) {
+    conn.execute_update(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema_name))
+        .await
+        .expect("CREATE SCHEMA should succeed");
+
+    conn.execute_update(&format!(
+        "CREATE TABLE {}.test_data (id INTEGER, name VARCHAR(100))",
+        schema_name
+    ))
+    .await
+    .expect("CREATE TABLE should succeed");
+}
+
+/// Test that forcing the CSV path via `with_native_parquet(Some(false))` succeeds
+/// regardless of the server version.
+#[tokio::test]
+#[ignore]
+async fn test_parquet_import_forced_csv_path_works() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let schema_name = generate_test_schema_name();
+    setup_id_name_table(&mut conn, &schema_name).await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let parquet_path = write_small_parquet(temp_dir.path(), "test.parquet");
+
+    let options = ParquetImportOptions::default().with_native_parquet(Some(false));
+
+    let rows = conn
+        .import_from_parquet(
+            &format!("{}.test_data", schema_name),
+            &parquet_path,
+            options,
+        )
+        .await
+        .expect("CSV-path Parquet import should succeed");
+
+    assert_eq!(rows, 3, "Should import 3 rows via CSV path");
+
+    let batches = conn
+        .query(&format!(
+            "SELECT id, name FROM {}.test_data ORDER BY id",
+            schema_name
+        ))
+        .await
+        .expect("SELECT should succeed");
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_rows(), 3, "Should have 3 rows in result");
+
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// Test the native Parquet import path when the server supports it.
+/// Skips gracefully on older server versions.
+#[tokio::test]
+#[ignore]
+async fn test_parquet_import_native_path_when_supported() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+
+    if !conn.supports_native_parquet_import() {
+        eprintln!("skip: server does not support native Parquet import (< 2025.1.11)");
+        conn.close().await.expect("Failed to close connection");
+        return;
+    }
+
+    let schema_name = generate_test_schema_name();
+    setup_id_name_table(&mut conn, &schema_name).await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let parquet_path = write_small_parquet(temp_dir.path(), "test.parquet");
+
+    let options = ParquetImportOptions::default().with_native_parquet(Some(true));
+
+    let rows = conn
+        .import_from_parquet(
+            &format!("{}.test_data", schema_name),
+            &parquet_path,
+            options,
+        )
+        .await
+        .expect("Native Parquet import should succeed");
+
+    assert_eq!(rows, 3, "Should import 3 rows via native path");
+
+    let batches = conn
+        .query(&format!(
+            "SELECT id, name FROM {}.test_data ORDER BY id",
+            schema_name
+        ))
+        .await
+        .expect("SELECT should succeed");
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_rows(), 3, "Should have 3 rows in result");
+
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// Test native Parquet import via the stream (reader) path.
+/// Skips gracefully on older server versions.
+#[tokio::test]
+#[ignore]
+async fn test_parquet_stream_import_native_path() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+
+    if !conn.supports_native_parquet_import() {
+        eprintln!("skip: server does not support native Parquet import (< 2025.1.11)");
+        conn.close().await.expect("Failed to close connection");
+        return;
+    }
+
+    let schema_name = generate_test_schema_name();
+    setup_id_name_table(&mut conn, &schema_name).await;
+
+    // Write the parquet file then read it into memory as a Cursor for streaming.
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let parquet_path = write_small_parquet(temp_dir.path(), "test.parquet");
+
+    let parquet_bytes = tokio::fs::read(&parquet_path)
+        .await
+        .expect("Failed to read parquet file");
+    let reader = std::io::Cursor::new(parquet_bytes);
+
+    let options = ParquetImportOptions::default().with_native_parquet(Some(true));
+
+    let rows = conn
+        .import_from_parquet_stream(&format!("{}.test_data", schema_name), reader, options)
+        .await
+        .expect("Native Parquet stream import should succeed");
+
+    assert_eq!(rows, 3, "Should import 3 rows via native stream path");
+
+    let batches = conn
+        .query(&format!(
+            "SELECT id, name FROM {}.test_data ORDER BY id",
+            schema_name
+        ))
+        .await
+        .expect("SELECT should succeed");
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_rows(), 3, "Should have 3 rows in result");
+
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// Test parallel native Parquet import from multiple files.
+/// Skips gracefully on older server versions.
+#[tokio::test]
+#[ignore]
+async fn test_parallel_parquet_import_native_path() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+
+    if !conn.supports_native_parquet_import() {
+        eprintln!("skip: server does not support native Parquet import (< 2025.1.11)");
+        conn.close().await.expect("Failed to close connection");
+        return;
+    }
+
+    let schema_name = generate_test_schema_name();
+    setup_id_name_table(&mut conn, &schema_name).await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let path1 = write_small_parquet_offset(temp_dir.path(), "part1.parquet", 1);
+    let path2 = write_small_parquet_offset(temp_dir.path(), "part2.parquet", 10);
+
+    let options = ParquetImportOptions::default().with_native_parquet(Some(true));
+
+    let rows = conn
+        .import_parquet_from_files(
+            &format!("{}.test_data", schema_name),
+            vec![path1, path2],
+            options,
+        )
+        .await
+        .expect("Parallel native Parquet import should succeed");
+
+    assert_eq!(rows, 4, "Should import 4 rows total (2 per file)");
+
+    let batches = conn
+        .query(&format!("SELECT COUNT(*) FROM {}.test_data", schema_name))
+        .await
+        .expect("SELECT COUNT should succeed");
+    assert!(!batches.is_empty());
+
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}
+
+/// Test that forcing CSV path via `with_native_parquet(Some(false))` works even
+/// on a modern server that would otherwise auto-select the native path.
+#[tokio::test]
+#[ignore]
+async fn test_parquet_import_forced_csv_path_fallback_works() {
+    skip_if_no_exasol!();
+
+    let mut conn = get_test_connection().await.expect("Failed to connect");
+    let schema_name = generate_test_schema_name();
+    setup_id_name_table(&mut conn, &schema_name).await;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let parquet_path = write_small_parquet(temp_dir.path(), "test.parquet");
+
+    // Force CSV path explicitly — must succeed regardless of server version.
+    let options = ParquetImportOptions::default().with_native_parquet(Some(false));
+
+    let rows = conn
+        .import_from_parquet(
+            &format!("{}.test_data", schema_name),
+            &parquet_path,
+            options,
+        )
+        .await
+        .expect("Forced CSV path should succeed on any server");
+
+    assert_eq!(rows, 3, "Should import 3 rows via forced CSV path");
+
+    let batches = conn
+        .query(&format!(
+            "SELECT id, name FROM {}.test_data ORDER BY id",
+            schema_name
+        ))
+        .await
+        .expect("SELECT should succeed");
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_rows(), 3, "Data should round-trip correctly");
+
+    cleanup_schema(&mut conn, &schema_name).await;
+    conn.close().await.expect("Failed to close connection");
+}

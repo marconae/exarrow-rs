@@ -22,11 +22,14 @@ use bytes::Bytes;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::query::import::{ImportFileEntry, ImportQuery, RowSeparator};
+use crate::query::import::{ImportFileEntry, ImportFormat, ImportQuery, RowSeparator};
 use crate::transport::HttpTransportClient;
 use crate::types::{infer_schema_from_parquet, infer_schema_from_parquet_files, ColumnNameMode};
 
-use super::parallel::{convert_parquet_files_to_csv, stream_files_parallel, ParallelTransportPool};
+use super::parallel::{
+    convert_parquet_files_to_csv, stream_files_parallel, stream_parquet_files_parallel,
+    ParallelTransportPool,
+};
 use super::source::IntoFileSources;
 use super::ImportError;
 
@@ -76,6 +79,12 @@ pub struct ParquetImportOptions {
     /// - `Quoted`: Preserve original column names (default)
     /// - `Sanitize`: Convert to uppercase, replace invalid chars
     pub column_name_mode: ColumnNameMode,
+
+    /// Override auto-detection of native Parquet import.
+    /// - `None`: auto-detect from server version (default)
+    /// - `Some(true)`: force native Parquet import path
+    /// - `Some(false)`: force CSV conversion path
+    pub native_parquet_override: Option<bool>,
 }
 
 impl Default for ParquetImportOptions {
@@ -92,6 +101,7 @@ impl Default for ParquetImportOptions {
             port: 0,
             create_table_if_not_exists: false,
             column_name_mode: ColumnNameMode::default(),
+            native_parquet_override: None,
         }
     }
 }
@@ -190,6 +200,22 @@ impl ParquetImportOptions {
         self.column_name_mode = mode;
         self
     }
+
+    /// Override auto-detection of native Parquet import.
+    ///
+    /// By default (`None`), the import path is selected automatically based
+    /// on the connected Exasol server version. Pass `Some(true)` to force the
+    /// native Parquet import path, or `Some(false)` to force the CSV
+    /// conversion path.
+    ///
+    /// # Arguments
+    ///
+    /// * `override_` - Native Parquet override
+    #[must_use]
+    pub fn with_native_parquet(mut self, override_: Option<bool>) -> Self {
+        self.native_parquet_override = override_;
+        self
+    }
 }
 
 /// Imports data from a Parquet file into an Exasol table.
@@ -225,6 +251,7 @@ pub async fn import_from_parquet<F, Fut>(
     table: &str,
     file_path: &Path,
     options: ParquetImportOptions,
+    use_native: bool,
 ) -> Result<u64, ImportError>
 where
     F: FnMut(String) -> Fut,
@@ -240,6 +267,66 @@ where
                 return Err(ImportError::SqlError(e));
             }
         }
+    }
+
+    if use_native {
+        // Native Parquet path: read raw file bytes and serve them via HTTP
+        // range requests. The server parses the Parquet directly, so all
+        // CSV-specific options (encoding, separator, delimiter, null_value)
+        // are skipped.
+        let file_bytes = tokio::fs::read(file_path).await?;
+
+        let mut client = HttpTransportClient::connect(&options.host, options.port, options.use_tls)
+            .await
+            .map_err(|e| {
+                ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
+            })?;
+
+        let internal_addr = client.internal_address().to_string();
+        let public_key = client.public_key_fingerprint().map(String::from);
+
+        let mut query = ImportQuery::new(table)
+            .at_address(&internal_addr)
+            .with_format(ImportFormat::Parquet)
+            .file_name("001");
+
+        if let Some(ref schema) = options.schema {
+            query = query.schema(schema);
+        }
+
+        if let Some(ref columns) = options.columns {
+            let cols: Vec<&str> = columns.iter().map(String::as_str).collect();
+            query = query.columns(cols);
+        }
+
+        if let Some(pk) = public_key.as_deref() {
+            query = query.with_public_key(pk);
+        }
+
+        let sql = query.build();
+
+        let stream_handle = tokio::spawn(async move {
+            client
+                .handle_parquet_import_requests(&file_bytes)
+                .await
+                .map_err(ImportError::TransportError)?;
+            Ok::<(), ImportError>(())
+        });
+
+        let sql_result = execute_sql(sql).await;
+        let stream_result = stream_handle.await;
+
+        match stream_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(ImportError::StreamError(format!(
+                    "Stream task panicked: {e}"
+                )))
+            }
+        }
+
+        return sql_result.map_err(ImportError::SqlError);
     }
 
     // Read the Parquet file and convert to CSV
@@ -387,6 +474,7 @@ pub async fn import_from_parquet_stream<F, Fut, R>(
     table: &str,
     mut reader: R,
     options: ParquetImportOptions,
+    use_native: bool,
 ) -> Result<u64, ImportError>
 where
     F: FnOnce(String) -> Fut,
@@ -401,6 +489,64 @@ where
 
     if buffer.is_empty() {
         return Ok(0);
+    }
+
+    if use_native {
+        // Native Parquet path: forward buffered bytes directly to the server
+        // via HTTP range requests. Skip CSV conversion entirely.
+        let mut client = HttpTransportClient::connect(&options.host, options.port, options.use_tls)
+            .await
+            .map_err(|e| {
+                ImportError::HttpTransportError(format!("Failed to connect to Exasol: {e}"))
+            })?;
+
+        let internal_addr = client.internal_address().to_string();
+        let public_key = client.public_key_fingerprint().map(String::from);
+
+        let mut query = ImportQuery::new(table)
+            .at_address(&internal_addr)
+            .with_format(ImportFormat::Parquet)
+            .file_name("001");
+
+        if let Some(ref schema) = options.schema {
+            query = query.schema(schema);
+        }
+
+        if let Some(ref columns) = options.columns {
+            let cols: Vec<&str> = columns.iter().map(String::as_str).collect();
+            query = query.columns(cols);
+        }
+
+        if let Some(pk) = public_key.as_deref() {
+            query = query.with_public_key(pk);
+        }
+
+        let sql = query.build();
+
+        // Move the buffered Parquet bytes into the streaming task.
+        let buffered_bytes = buffer;
+        let stream_handle = tokio::spawn(async move {
+            client
+                .handle_parquet_import_requests(&buffered_bytes)
+                .await
+                .map_err(ImportError::TransportError)?;
+            Ok::<(), ImportError>(())
+        });
+
+        let sql_result = execute_sql(sql).await;
+        let stream_result = stream_handle.await;
+
+        match stream_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(ImportError::StreamError(format!(
+                    "Stream task panicked: {e}"
+                )))
+            }
+        }
+
+        return sql_result.map_err(ImportError::SqlError);
     }
 
     // Convert to Bytes for Parquet reader
@@ -564,6 +710,7 @@ pub async fn import_from_parquet_files<F, Fut, S>(
     table: &str,
     file_paths: S,
     options: ParquetImportOptions,
+    use_native: bool,
 ) -> Result<u64, ImportError>
 where
     F: FnMut(String) -> Fut,
@@ -572,9 +719,11 @@ where
 {
     let paths = file_paths.into_sources();
 
-    // Delegate to single-file implementation for one file
+    // Delegate to single-file implementation for one file. The chosen
+    // transport mode (native vs CSV) is forwarded so the single-file path
+    // makes the matching decision.
     if paths.len() == 1 {
-        return import_from_parquet(execute_sql, table, &paths[0], options).await;
+        return import_from_parquet(execute_sql, table, &paths[0], options, use_native).await;
     }
 
     if paths.is_empty() {
@@ -597,6 +746,47 @@ where
 
     // Calculate connection count before transferring paths ownership
     let num_files = paths.len();
+
+    if use_native {
+        // Native Parquet path: skip CSV conversion entirely. The pool's
+        // generated `001.csv`-style file names are reused as-is because
+        // `ImportQuery::with_format(ImportFormat::Parquet)` rewrites the
+        // suffix to `.parquet` via `get_file_name_for`.
+        let pool =
+            ParallelTransportPool::connect(&options.host, options.port, options.use_tls, num_files)
+                .await?;
+
+        let entries: Vec<ImportFileEntry> = pool
+            .file_entries()
+            .iter()
+            .map(|e| {
+                ImportFileEntry::new(e.address.clone(), e.file_name.clone(), e.public_key.clone())
+            })
+            .collect();
+
+        let query = build_multi_file_parquet_native_query(table, &options, entries);
+        let sql = query.build();
+
+        let connections = pool.into_connections();
+
+        let stream_handle =
+            tokio::spawn(async move { stream_parquet_files_parallel(connections, paths).await });
+
+        let sql_result = execute_sql(sql).await;
+        let stream_result = stream_handle.await;
+
+        match stream_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(ImportError::StreamError(format!(
+                    "Stream task panicked: {e}"
+                )))
+            }
+        }
+
+        return sql_result.map_err(ImportError::SqlError);
+    }
 
     // Convert all Parquet files to CSV in parallel
     let csv_data_vec = convert_parquet_files_to_csv(
@@ -662,7 +852,7 @@ where
     sql_result.map_err(ImportError::SqlError)
 }
 
-/// Build an ImportQuery for multi-file Parquet import.
+/// Build an ImportQuery for multi-file Parquet import (CSV conversion path).
 fn build_multi_file_parquet_query(
     table: &str,
     options: &ParquetImportOptions,
@@ -687,6 +877,34 @@ fn build_multi_file_parquet_query(
 
     if !options.null_value.is_empty() {
         query = query.null_value(&options.null_value);
+    }
+
+    query
+}
+
+/// Build an ImportQuery for multi-file native Parquet import.
+///
+/// Unlike the CSV variant, this query selects `ImportFormat::Parquet` so the
+/// generated SQL emits `FROM PARQUET` and rewrites file extensions to
+/// `.parquet`. CSV-specific options (encoding, separator, delimiter,
+/// row separator, null_value) are intentionally omitted: the server reads the
+/// schema from the Parquet payload itself.
+fn build_multi_file_parquet_native_query(
+    table: &str,
+    options: &ParquetImportOptions,
+    entries: Vec<ImportFileEntry>,
+) -> ImportQuery {
+    let mut query = ImportQuery::new(table)
+        .with_files(entries)
+        .with_format(ImportFormat::Parquet);
+
+    if let Some(ref schema) = options.schema {
+        query = query.schema(schema);
+    }
+
+    if let Some(ref columns) = options.columns {
+        let cols: Vec<&str> = columns.iter().map(String::as_str).collect();
+        query = query.columns(cols);
     }
 
     query
@@ -1206,6 +1424,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parquet_import_options_native_override_default_none() {
+        let options = ParquetImportOptions::default();
+        assert_eq!(options.native_parquet_override, None);
+    }
+
+    #[test]
+    fn test_parquet_import_options_with_native_parquet_some_true() {
+        let options = ParquetImportOptions::default().with_native_parquet(Some(true));
+        assert_eq!(options.native_parquet_override, Some(true));
+    }
+
+    #[test]
+    fn test_parquet_import_options_with_native_parquet_some_false() {
+        let options = ParquetImportOptions::default().with_native_parquet(Some(false));
+        assert_eq!(options.native_parquet_override, Some(false));
+    }
+
+    #[test]
+    fn test_parquet_import_options_with_native_parquet_none_resets() {
+        // First force a value, then reset back to None.
+        let options = ParquetImportOptions::default()
+            .with_native_parquet(Some(true))
+            .with_native_parquet(None);
+        assert_eq!(options.native_parquet_override, None);
+    }
+
+    #[test]
     fn test_record_batch_empty() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         let batch = RecordBatch::new_empty(schema);
@@ -1522,7 +1767,8 @@ mod tests {
             Err::<u64, String>("schema NONEXISTENT_SCHEMA does not exist".to_string())
         };
 
-        let result = import_from_parquet(execute_sql, "test_table", &parquet_path, options).await;
+        let result =
+            import_from_parquet(execute_sql, "test_table", &parquet_path, options, false).await;
 
         assert!(result.is_err(), "Should return an error");
         let err = result.unwrap_err();
@@ -1565,7 +1811,8 @@ mod tests {
             }
         };
 
-        let result = import_from_parquet(execute_sql, "test_table", &parquet_path, options).await;
+        let result =
+            import_from_parquet(execute_sql, "test_table", &parquet_path, options, false).await;
 
         // The function should NOT have returned SqlError (the DDL error was ignored).
         // It will fail at HTTP transport since there's no real Exasol, but that's fine.
@@ -1602,6 +1849,7 @@ mod tests {
             "test_table",
             vec![parquet_path1, parquet_path2],
             options,
+            false,
         )
         .await;
 

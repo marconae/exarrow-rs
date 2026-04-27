@@ -3,9 +3,10 @@
 //! This module handles session lifecycle, state tracking, and connection pooling support.
 
 use crate::connection::auth::{AuthResponseData, AuthenticationHandler};
+use crate::connection::version::parse_release_version;
 use crate::error::ConnectionError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -125,6 +126,9 @@ pub struct Session {
 
     /// Session attributes
     attributes: Arc<RwLock<std::collections::HashMap<String, String>>>,
+
+    /// Memoized native-Parquet-import capability, derived from `server_info.release_version`.
+    native_parquet_cache: OnceLock<bool>,
 }
 
 impl Session {
@@ -140,7 +144,20 @@ impl Session {
             in_transaction: AtomicBool::new(false),
             current_schema: Arc::new(RwLock::new(None)),
             attributes: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            native_parquet_cache: OnceLock::new(),
         }
+    }
+
+    /// Whether the connected Exasol server supports native Parquet IMPORT
+    /// (added in Exasol 2025.1.11). The result is parsed from
+    /// `server_info.release_version` and memoized for the session lifetime;
+    /// unparseable versions are treated as unsupported.
+    pub fn supports_native_parquet_import(&self) -> bool {
+        *self.native_parquet_cache.get_or_init(|| {
+            parse_release_version(&self.server_info.release_version)
+                .map(crate::connection::version::supports_native_parquet_import)
+                .unwrap_or(false)
+        })
     }
 
     /// Get the session ID.
@@ -433,10 +450,14 @@ mod tests {
     use crate::connection::auth::{AuthResponseData, Credentials};
 
     fn mock_server_info() -> AuthResponseData {
+        mock_server_info_with_version("7.1.0")
+    }
+
+    fn mock_server_info_with_version(release_version: &str) -> AuthResponseData {
         AuthResponseData {
             session_id: "test_session".to_string(),
             protocol_version: 3,
-            release_version: "7.1.0".to_string(),
+            release_version: release_version.to_string(),
             database_name: "EXA".to_string(),
             product_name: "Exasol".to_string(),
             max_data_message_size: 4_194_304,
@@ -736,5 +757,41 @@ mod tests {
         assert!(SessionState::InTransaction.can_execute());
         assert!(!SessionState::Executing.can_execute());
         assert!(!SessionState::Closed.can_execute());
+    }
+
+    #[test]
+    fn test_supports_native_parquet_import_is_pure_and_memoized() {
+        let session_71 = Session::new(
+            "s1".to_string(),
+            mock_server_info_with_version("7.1.0"),
+            SessionConfig::default(),
+        );
+        assert!(!session_71.supports_native_parquet_import());
+
+        let session_2025_1_11 = Session::new(
+            "s2".to_string(),
+            mock_server_info_with_version("2025.1.11"),
+            SessionConfig::default(),
+        );
+        assert!(session_2025_1_11.supports_native_parquet_import());
+
+        let session_2025_2_0 = Session::new(
+            "s3".to_string(),
+            mock_server_info_with_version("2025.2.0"),
+            SessionConfig::default(),
+        );
+        assert!(session_2025_2_0.supports_native_parquet_import());
+
+        let session_garbage = Session::new(
+            "s4".to_string(),
+            mock_server_info_with_version("garbage"),
+            SessionConfig::default(),
+        );
+        assert!(!session_garbage.supports_native_parquet_import());
+
+        // Verify memoization: calling twice returns the same value without panic
+        let first = session_2025_1_11.supports_native_parquet_import();
+        let second = session_2025_1_11.supports_native_parquet_import();
+        assert_eq!(first, second);
     }
 }

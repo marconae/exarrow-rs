@@ -712,6 +712,53 @@ impl HttpTransportClient {
         Ok(request)
     }
 
+    /// Serves a Parquet file to Exasol via HTTP range requests.
+    ///
+    /// On Exasol 2025.1.11+ servers, native `IMPORT ... FROM PARQUET` pulls
+    /// the file from the driver using HTTP range requests instead of the
+    /// chunked-body push used for CSV. After the EXA tunneling handshake,
+    /// Exasol typically issues:
+    ///
+    /// 1. A `HEAD /<file>.parquet` to learn the file size; the driver
+    ///    responds with `200 OK` + `Content-Length` and no body.
+    /// 2. One or more `GET /<file>.parquet` requests carrying a
+    ///    `Range: bytes=<start>-<end>` header (footer first, then row
+    ///    groups); the driver responds with `206 Partial Content` and the
+    ///    requested byte slice.
+    /// 3. Optionally a `GET` without a `Range` header, in which case the
+    ///    driver responds with `200 OK` + `Content-Length` and the full
+    ///    body (rare but legal).
+    ///
+    /// The method loops until the peer closes the connection (signalled by
+    /// an `IoError` or `ProtocolError` from `read_http_request`), at which
+    /// point it returns `Ok(())`. Any unexpected method (e.g. `PUT`) is
+    /// rejected with `405 Method Not Allowed` and yields a
+    /// `TransportError::ProtocolError`. A malformed `Range` header yields
+    /// a `400 Bad Request` and the loop continues.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_bytes` - The complete Parquet file bytes to serve.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TransportError` only on unrecoverable conditions: an
+    /// unexpected method or a write failure. Connection close is treated as
+    /// successful completion.
+    pub async fn handle_parquet_import_requests(
+        &mut self,
+        file_bytes: &[u8],
+    ) -> Result<(), TransportError> {
+        match &mut self.stream {
+            ClientConnectionStream::Tcp(stream) => {
+                serve_parquet_range_requests(stream, file_bytes).await
+            }
+            ClientConnectionStream::Tls(stream) => {
+                serve_parquet_range_requests(stream.as_mut(), file_bytes).await
+            }
+        }
+    }
+
     /// Handles an EXPORT request from Exasol.
     ///
     /// This method implements the correct EXPORT protocol flow:
@@ -987,6 +1034,148 @@ pub async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Strin
     String::from_utf8(line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
+/// Serves a Parquet file over the given async stream using HTTP range
+/// requests.
+///
+/// This is the underlying loop driving
+/// [`HttpTransportClient::handle_parquet_import_requests`]. It is generic
+/// over any `AsyncRead + AsyncWrite + Unpin` stream so that it can be
+/// exercised in unit tests via `tokio::io::duplex` without spinning up a
+/// real TCP/TLS connection.
+///
+/// See [`HttpTransportClient::handle_parquet_import_requests`] for the
+/// full protocol description.
+async fn serve_parquet_range_requests<S>(
+    stream: &mut S,
+    file_bytes: &[u8],
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let request = match parse_http_request(stream).await {
+            Ok(req) => req,
+            // Peer closed the connection cleanly (or with a stream-level I/O
+            // error). Treat as end-of-conversation.
+            Err(TransportError::IoError(_)) => return Ok(()),
+            // A malformed/empty request line at this stage usually signals
+            // peer close without another request — treat the same as IoError.
+            Err(TransportError::ProtocolError(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+
+        match request.method {
+            HttpMethod::Head => {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                    file_bytes.len()
+                );
+                stream.write_all(response.as_bytes()).await.map_err(|e| {
+                    TransportError::IoError(format!("Failed to write HEAD response: {e}"))
+                })?;
+                stream.flush().await.map_err(|e| {
+                    TransportError::IoError(format!("Failed to flush HEAD response: {e}"))
+                })?;
+            }
+            HttpMethod::Get => {
+                if let Some(range_header) = request.headers.get("range") {
+                    // Parse "bytes=<start>-<end>". Anything malformed (missing
+                    // prefix, missing dash, non-numeric, end < start, or
+                    // start >= file_len) yields a 400 and the loop continues
+                    // — Exasol may try again or just close the connection.
+                    let parsed_range = range_header
+                        .strip_prefix("bytes=")
+                        .and_then(|s| s.split_once('-'))
+                        .and_then(|(start_str, end_str)| {
+                            let start = start_str.trim().parse::<usize>().ok()?;
+                            let end = end_str.trim().parse::<usize>().ok()?;
+                            Some((start, end))
+                        });
+
+                    if let Some((start, end)) = parsed_range {
+                        if file_bytes.is_empty() || start >= file_bytes.len() {
+                            stream
+                                .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                                .await
+                                .map_err(|e| {
+                                    TransportError::IoError(format!("Failed to write 400: {e}"))
+                                })?;
+                            stream.flush().await.map_err(|e| {
+                                TransportError::IoError(format!("Failed to flush 400: {e}"))
+                            })?;
+                            continue;
+                        }
+                        let clamped_end = end.min(file_bytes.len().saturating_sub(1));
+                        if clamped_end < start {
+                            stream
+                                .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                                .await
+                                .map_err(|e| {
+                                    TransportError::IoError(format!("Failed to write 400: {e}"))
+                                })?;
+                            stream.flush().await.map_err(|e| {
+                                TransportError::IoError(format!("Failed to flush 400: {e}"))
+                            })?;
+                            continue;
+                        }
+                        let slice = &file_bytes[start..=clamped_end];
+                        let response = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
+                            slice.len(),
+                            start,
+                            clamped_end,
+                            file_bytes.len()
+                        );
+                        stream.write_all(response.as_bytes()).await.map_err(|e| {
+                            TransportError::IoError(format!("Failed to write 206 headers: {e}"))
+                        })?;
+                        stream.write_all(slice).await.map_err(|e| {
+                            TransportError::IoError(format!("Failed to write 206 body: {e}"))
+                        })?;
+                        stream.flush().await.map_err(|e| {
+                            TransportError::IoError(format!("Failed to flush 206 response: {e}"))
+                        })?;
+                    } else {
+                        stream
+                            .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                            .await
+                            .map_err(|e| {
+                                TransportError::IoError(format!("Failed to write 400: {e}"))
+                            })?;
+                        stream.flush().await.map_err(|e| {
+                            TransportError::IoError(format!("Failed to flush 400: {e}"))
+                        })?;
+                    }
+                } else {
+                    // Full GET without Range header — rare but legal.
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                        file_bytes.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.map_err(|e| {
+                        TransportError::IoError(format!("Failed to write GET headers: {e}"))
+                    })?;
+                    stream.write_all(file_bytes).await.map_err(|e| {
+                        TransportError::IoError(format!("Failed to write GET body: {e}"))
+                    })?;
+                    stream.flush().await.map_err(|e| {
+                        TransportError::IoError(format!("Failed to flush GET response: {e}"))
+                    })?;
+                }
+            }
+            HttpMethod::Put => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                    .await;
+                let _ = stream.flush().await;
+                return Err(TransportError::ProtocolError(
+                    "Unexpected PUT in Parquet import handler".to_string(),
+                ));
+            }
+        }
+    }
+}
+
 /// HTTP method enum for parsed requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -994,6 +1183,8 @@ pub enum HttpMethod {
     Get,
     /// HTTP PUT method (used for EXPORT - Exasol sends data)
     Put,
+    /// HTTP HEAD method (used for native Parquet IMPORT - Exasol probes file size)
+    Head,
 }
 
 impl std::fmt::Display for HttpMethod {
@@ -1001,6 +1192,7 @@ impl std::fmt::Display for HttpMethod {
         match self {
             HttpMethod::Get => write!(f, "GET"),
             HttpMethod::Put => write!(f, "PUT"),
+            HttpMethod::Head => write!(f, "HEAD"),
         }
     }
 }
@@ -1074,6 +1266,7 @@ pub async fn parse_http_request<S: AsyncRead + Unpin>(
     let method = match parts[0] {
         "GET" => HttpMethod::Get,
         "PUT" => HttpMethod::Put,
+        "HEAD" => HttpMethod::Head,
         other => {
             return Err(TransportError::ProtocolError(format!(
                 "Unsupported HTTP method: '{other}'"
@@ -1741,5 +1934,171 @@ mod tests {
         let config = cert.to_client_config();
 
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn test_http_method_display_head() {
+        assert_eq!(HttpMethod::Head.to_string(), "HEAD");
+    }
+
+    #[tokio::test]
+    async fn test_parse_http_request_head() {
+        use tokio::io::AsyncWriteExt;
+
+        let request = b"HEAD /001.parquet HTTP/1.1\r\nHost: 10.0.0.5:8563\r\n\r\n";
+
+        let (mut client, mut server) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            server.write_all(request).await.unwrap();
+        });
+
+        let parsed = parse_http_request(&mut client).await.unwrap();
+        assert_eq!(parsed.method, HttpMethod::Head);
+        assert_eq!(parsed.path, "/001.parquet");
+    }
+
+    #[tokio::test]
+    async fn test_handle_parquet_import_requests_serves_head_and_range() {
+        // Script: HEAD probe → GET Range bytes=0-3 → GET Range bytes=4-7
+        // → GET (no Range, full body) → close. Assert each response shape
+        // and body slice match the expected bytes from a known file payload.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // 16 bytes of distinguishable content; large enough for two
+        // non-overlapping range slices and one full-file response.
+        let file_bytes: Vec<u8> = (0u8..16u8).collect();
+        let file_len = file_bytes.len();
+
+        // `server_side` is what the handler sees; `client_side` is the
+        // scripted Exasol mock that sends requests and reads responses.
+        let (mut server_side, mut client_side) = tokio::io::duplex(4096);
+
+        let file_bytes_for_handler = file_bytes.clone();
+        let handler = tokio::spawn(async move {
+            serve_parquet_range_requests(&mut server_side, &file_bytes_for_handler).await
+        });
+
+        // 1. HEAD request — expect "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n"
+        client_side
+            .write_all(b"HEAD /001.parquet HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        client_side.flush().await.unwrap();
+
+        let head_response = read_exactly(&mut client_side, 39).await;
+        let head_str = std::str::from_utf8(&head_response).unwrap();
+        assert!(
+            head_str.starts_with("HTTP/1.1 200 OK\r\n"),
+            "HEAD response should start with 200 OK: {:?}",
+            head_str
+        );
+        assert!(
+            head_str.contains(&format!("Content-Length: {file_len}\r\n")),
+            "HEAD response should advertise Content-Length: {file_len}"
+        );
+        assert!(head_str.ends_with("\r\n\r\n"));
+
+        // 2. GET with Range bytes=0-3 — expect 206 Partial Content + 4 bytes
+        client_side
+            .write_all(b"GET /001.parquet HTTP/1.1\r\nHost: x\r\nRange: bytes=0-3\r\n\r\n")
+            .await
+            .unwrap();
+        client_side.flush().await.unwrap();
+
+        let (status_line_1, body_1) = read_response_with_body(&mut client_side, 4).await;
+        assert!(
+            status_line_1.starts_with("HTTP/1.1 206 Partial Content\r\n"),
+            "expected 206 Partial Content, got {:?}",
+            status_line_1
+        );
+        assert!(
+            status_line_1.contains("Content-Length: 4\r\n"),
+            "expected Content-Length: 4: {:?}",
+            status_line_1
+        );
+        assert!(
+            status_line_1.contains(&format!("Content-Range: bytes 0-3/{file_len}\r\n")),
+            "expected Content-Range: bytes 0-3/{file_len}: {:?}",
+            status_line_1
+        );
+        assert_eq!(body_1, file_bytes[0..=3], "body slice for 0-3 mismatch");
+
+        // 3. GET with Range bytes=4-7 — expect 206 Partial Content + 4 bytes
+        client_side
+            .write_all(b"GET /001.parquet HTTP/1.1\r\nHost: x\r\nRange: bytes=4-7\r\n\r\n")
+            .await
+            .unwrap();
+        client_side.flush().await.unwrap();
+
+        let (status_line_2, body_2) = read_response_with_body(&mut client_side, 4).await;
+        assert!(
+            status_line_2.contains("Content-Range: bytes 4-7/16\r\n"),
+            "expected Content-Range: bytes 4-7/16: {:?}",
+            status_line_2
+        );
+        assert_eq!(body_2, file_bytes[4..=7], "body slice for 4-7 mismatch");
+
+        // 4. GET without Range header — expect full 200 OK + 16 bytes
+        client_side
+            .write_all(b"GET /001.parquet HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        client_side.flush().await.unwrap();
+
+        let (status_line_3, body_3) = read_response_with_body(&mut client_side, file_len).await;
+        assert!(
+            status_line_3.starts_with("HTTP/1.1 200 OK\r\n"),
+            "expected full 200 OK, got {:?}",
+            status_line_3
+        );
+        assert!(
+            status_line_3.contains(&format!("Content-Length: {file_len}\r\n")),
+            "expected Content-Length: {file_len}: {:?}",
+            status_line_3
+        );
+        assert_eq!(body_3, file_bytes, "full-body slice mismatch");
+
+        // 5. Drop the client side to close the connection — handler returns Ok(()).
+        drop(client_side);
+
+        let result = handler.await.expect("handler task panicked");
+        assert!(
+            result.is_ok(),
+            "handler returned error on connection close: {:?}",
+            result
+        );
+
+        // Helper: read N bytes exactly.
+        async fn read_exactly(stream: &mut tokio::io::DuplexStream, n: usize) -> Vec<u8> {
+            let mut buf = vec![0u8; n];
+            stream.read_exact(&mut buf).await.unwrap();
+            buf
+        }
+
+        // Helper: read until end of headers (\r\n\r\n), then read the
+        // expected body length. Returns (header_section_as_string, body).
+        async fn read_response_with_body(
+            stream: &mut tokio::io::DuplexStream,
+            body_len: usize,
+        ) -> (String, Vec<u8>) {
+            let mut headers = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream.read_exact(&mut byte).await.unwrap();
+                headers.push(byte[0]);
+                if headers.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                if headers.len() > 4096 {
+                    panic!("headers exceeded sanity limit");
+                }
+            }
+            let header_str = String::from_utf8(headers).unwrap();
+            let mut body = vec![0u8; body_len];
+            if body_len > 0 {
+                stream.read_exact(&mut body).await.unwrap();
+            }
+            (header_str, body)
+        }
     }
 }

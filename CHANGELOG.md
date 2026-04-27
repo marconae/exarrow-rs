@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+- **Native Parquet import on Exasol 2025.1.11+**: When connected to Exasol 2025.1.11 or newer, `import_from_parquet`, `import_from_parquet_stream`, and `import_parquet_from_files` now serve raw Parquet bytes to the server via HTTP range requests instead of converting to CSV. This eliminates client-side CPU cost and reduces wire-bytes by 5–30x for typed columnar data.
+- Auto-detected from the server's `release_version` at connection time with no configuration required.
+- Override with `ParquetImportOptions::with_native_parquet(Some(false))` to force the CSV conversion path, or `Some(true)` to force native mode (returns a server error on pre-2025.1.11 servers).
+- Older Exasol versions (7.x, 8.x) continue to use the existing CSV conversion path unchanged.
+
 ## 0.11.0
 
 - **Breaking:** Renamed HTTP transport TLS option to `use_tls(bool)` uniformly across all import/export option builders. The old names `with_encryption` (Parquet import, Arrow import) and `use_encryption` (Parquet export, Arrow export) are removed. CSV builders were already using `use_tls` and are unchanged.

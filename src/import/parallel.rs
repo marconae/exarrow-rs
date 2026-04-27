@@ -255,6 +255,80 @@ pub async fn stream_files_parallel(
     Ok(())
 }
 
+/// Streams multiple Parquet files through HTTP connections in parallel using
+/// the native Parquet HEAD/GET-Range protocol.
+///
+/// Each file is read into memory and served by `handle_parquet_import_requests`
+/// which responds to repeated HEAD and ranged GET requests issued by the
+/// server. Tasks run concurrently and use fail-fast semantics.
+///
+/// # Arguments
+///
+/// * `connections` - HTTP transport clients (one per file)
+/// * `file_paths` - File paths to stream (one path per connection)
+///
+/// # Returns
+///
+/// Ok(()) on success.
+///
+/// # Errors
+///
+/// Returns `ImportError::InvalidConfig` when the connection count does not
+/// match the file count, or `ImportError::ParallelImportError` on the first
+/// streaming or task failure.
+pub async fn stream_parquet_files_parallel(
+    connections: Vec<HttpTransportClient>,
+    file_paths: Vec<PathBuf>,
+) -> Result<(), ImportError> {
+    if connections.len() != file_paths.len() {
+        return Err(ImportError::InvalidConfig(format!(
+            "Connection count ({}) != file count ({})",
+            connections.len(),
+            file_paths.len()
+        )));
+    }
+
+    let mut stream_handles: Vec<JoinHandle<Result<(), ImportError>>> =
+        Vec::with_capacity(connections.len());
+
+    for (idx, (mut client, path)) in connections.into_iter().zip(file_paths).enumerate() {
+        let handle = tokio::spawn(async move {
+            let file_bytes = tokio::fs::read(&path).await.map_err(|e| {
+                ImportError::ParallelImportError(format!(
+                    "File {}: failed to read '{}': {e}",
+                    idx,
+                    path.display()
+                ))
+            })?;
+
+            client
+                .handle_parquet_import_requests(&file_bytes)
+                .await
+                .map_err(|e| {
+                    ImportError::ParallelImportError(format!(
+                        "File {}: parquet range-request handler failed: {e}",
+                        idx
+                    ))
+                })?;
+
+            Ok(())
+        });
+
+        stream_handles.push(handle);
+    }
+
+    for (idx, handle) in stream_handles.into_iter().enumerate() {
+        handle
+            .await
+            .map_err(|e| {
+                ImportError::ParallelImportError(format!("Stream task {} panicked: {e}", idx))
+            })?
+            .map_err(|e| ImportError::ParallelImportError(format!("Stream {} failed: {e}", idx)))?;
+    }
+
+    Ok(())
+}
+
 /// Converts multiple Parquet files to CSV format in parallel.
 ///
 /// This function spawns blocking tasks to convert each Parquet file
@@ -427,6 +501,26 @@ mod tests {
         let file_data = vec![];
 
         let result = stream_files_parallel(connections, file_data, Compression::None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stream_parquet_files_parallel_mismatched_counts() {
+        let connections = vec![];
+        let file_paths = vec![PathBuf::from("/tmp/does-not-matter.parquet")];
+
+        let result = stream_parquet_files_parallel(connections, file_paths).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ImportError::InvalidConfig(_)));
+    }
+
+    #[tokio::test]
+    async fn test_stream_parquet_files_parallel_empty() {
+        let connections = vec![];
+        let file_paths: Vec<PathBuf> = vec![];
+
+        let result = stream_parquet_files_parallel(connections, file_paths).await;
         assert!(result.is_ok());
     }
 }
