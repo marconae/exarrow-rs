@@ -17,11 +17,11 @@ The right path depends on your data source and how much schema control you need:
 | You already have Arrow `RecordBatch`es in memory | Arrow import via the connection method `connection.import_from_record_batch()` or the ADBC `Statement` API |
 | You are calling from Python, Polars, or another language | The driver-manager path — see [Driver Manager](driver-manager.md) |
 
-Use the connection convenience methods (`connection.import_*` and `connection.export_*`) as the default choice. They automatically propagate the connection's host and port into the HTTP transport, so you only need to set format-specific options. Lower-level free functions and direct `HttpTransportClient` usage are available for advanced cases where you need full control over transport parameters, but they require you to supply host/port manually and are not the recommended starting point.
+Use the connection convenience methods (`connection.import_*` and `connection.export_*`) as the default choice. They automatically propagate the connection's host and port into the HTTP transport, so you only need to set format-specific options. They also use whatever control transport you configured (native TCP by default, which gives the best throughput; WebSocket if you set `?transport=websocket` for proxy or compatibility reasons). Lower-level free functions and direct `HttpTransportClient` usage are available for advanced cases where you need full control over transport parameters, but they require you to supply host/port manually and are not the recommended starting point.
 
-## WebSocket TLS vs HTTP transport TLS
+## Control Connection TLS vs HTTP Transport TLS
 
-Exasol import and export use **two independent TLS layers**. Enabling TLS on the main WebSocket (or native TCP) control connection does **not** automatically enable TLS on the HTTP transport tunnel used for bulk data transfer. Each layer must be configured separately.
+Exasol import and export use **two independent TLS layers**. Enabling TLS on the main control connection (native TCP or WebSocket) does **not** automatically enable TLS on the HTTP transport tunnel used for bulk data transfer. Each layer must be configured separately.
 
 | Layer | What it protects | Where it is configured |
 |-------|-----------------|------------------------|
